@@ -69,6 +69,8 @@ ANALYSIS_TIME=${ANALYSIS_TIME:-"2019-02-04T12:00"}  # assumed to be in UTC
 # trained on 3-hourly analysis data)
 FORECAST_DURATION=${FORECAST_DURATION:-"PT18H"}
 NUM_EVAL_STEPS=${NUM_EVAL_STEPS:-6}
+# All working directories (for input data, output data, intermediate files)
+# will be created under INFERENCE_WORKDIR
 INFERENCE_WORKDIR=${INFERENCE_WORKDIR:-"./inference_workdir"}
 
 echo "Creating forecast using following runtime args:"
