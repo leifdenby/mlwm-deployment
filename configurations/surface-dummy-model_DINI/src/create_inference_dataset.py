@@ -172,6 +172,8 @@ def _create_inference_datastore_config(
 
     # setup the split (test) for the dataset with a coordinate range along the
     # sampling dimension (analysis_time) of length 1
+    # XXX: this can't currently be used, as in we have to have train, val and
+    # test splits for now (see below)
     # inference_config.output.splitting = mdp_config.Splitting(
     #     dim=sampling_dim,
     #     splits={split_name: mdp_config.Split(**sampling_coord_range)},
