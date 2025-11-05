@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Container application (defuault to podman if not set)
+CONTAINER_APP=${CONTAINER_APP:-podman}
+
 # Configuration
 MLWM_LOG_LEVEL=DEBUG
 MLWM_IMAGE_NAME="surface-dummy-model_dini:latest"
@@ -12,13 +15,25 @@ HTTPS_PROXY=""
 if [ -z "$MLWM_PULL_PROXY" ]; then
 	echo "Info: MLWM_PULL_PROXY is not set. Using public DockerHub."
 	MLWM_PULL_PROXY=""
-    CR_URL="dockerhub.com"
+    CR_URL="docker.io"
 else
 	echo "Info: Using proxy $MLWM_PULL_PROXY and internal DockerHub."
     CR_URL="dockerhub.dmi.dk"
 fi
 
-MLWM_BASE_IMAGE="$CR_URL/pytorchlightning/pytorch_lightning:base-cuda-py3.12-torch2.6-cuda12.4.1"
+# if we're on ARM architecture, use the ARM base image
+if [ "$(uname -m)" = "aarch64" ]; then
+	echo "Info: Detected ARM architecture. Using ARM base image."
+	# dockerhub doesn't have an official pytorch image for ARM, so we use NVIDIA's NGC registry
+	# TODO: does DMI mirror this registry internally?
+	if [ -z "$CR_URL" ] || [ "$CR_URL" = "docker.io" ]; then
+		CR_URL="nvcr.io"
+	fi
+	MLWM_BASE_IMAGE="${CR_URL}/nvidia/pytorch:25.09-py3"
+else
+	echo "Info: Using x86_64 base image."
+	MLWM_BASE_IMAGE="$CR_URL/pytorchlightning/pytorch_lightning:base-cuda-py3.12-torch2.6-cuda12.4.1"
+fi
 
 # Check AWS credentials if S3 access is needed
 if [ -z "$AWS_ACCESS_KEY_ID" ]; then
@@ -35,12 +50,15 @@ if [ -z "$AWS_DEFAULT_REGION" ]; then
 fi
 
 # Pull base image with proxy
-HTTP_PROXY="$MLWM_PULL_PROXY" HTTPS_PROXY="$MLWM_PULL_PROXY" podman --log-level="$MLWM_LOG_LEVEL" pull "$MLWM_BASE_IMAGE"
+HTTP_PROXY="$MLWM_PULL_PROXY" HTTPS_PROXY="$MLWM_PULL_PROXY" ${CONTAINER_APP} --log-level="$MLWM_LOG_LEVEL" pull "$MLWM_BASE_IMAGE"
 
 # Build image with AWS credentials as build arguments
-podman build \
+echo "Running ${CONTAINER_APP} build to create image $MLWM_IMAGE_NAME ..."
+${CONTAINER_APP} build \
+	--build-arg BASE_IMAGE="$MLWM_BASE_IMAGE" \
 	--build-arg AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
 	--build-arg AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
     --build-arg AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
 	-t "$MLWM_IMAGE_NAME" \
-	-f Containerfile
+	-f Containerfile \
+	.

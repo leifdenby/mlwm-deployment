@@ -33,6 +33,31 @@ if [ -f .env ] ; then
     set -a && source .env && set +a
 fi
 
+USE_UV=${USE_UV:-true}
+if [ "$USE_UV" = true ] ; then
+    echo "Using uv to run commands"
+    uv_cmd="uv run"
+else
+    echo "Not using uv to run commands, using plain python"
+    uv_cmd=""
+fi
+
+# print CUDA debug info
+${UV_CMD} python - <<'PY'
+import torch, subprocess, os
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    cap = torch.cuda.get_device_capability(0)
+    print("device capability:", cap)
+    print("name:", torch.cuda.get_device_name(0))
+    try:
+        torch.randn(2, device="cuda")
+        print("cuda op: OK")
+    except Exception as e:
+        print("cuda op failed:", e)
+PY
+
 # set default override of input paths in the datastore config used for creating the
 # inference dataset if environment variable isn't set
 DATASTORE_INPUT_PATHS=${DATASTORE_INPUT_PATHS:-"\
@@ -73,7 +98,7 @@ mkdir -p ${OUTPUT_DATASETS_ROOT_PATH}
 
 # disable weights and biases logging, without this --eval with neural-lam fails
 # because it tries to set up the logging and there is no WANDB_API_KEY set
-uv run wandb disabled
+${UV_CMD} wandb disabled
 
 ## 1. Create inference dataset
 # This uses a cli stored within mlwm to called mllam-data-prep to create the
@@ -88,18 +113,18 @@ ANALYSIS_TIME=${ANALYSIS_TIME} \
 FORECAST_DURATION=${FORECAST_DURATION} \
 TIME_DIMENSIONS=${TIME_DIMENSIONS} \
 INFERENCE_WORKDIR=${INFERENCE_WORKDIR} \
-uv run python src/create_inference_dataset.py
+${UV_CMD} python src/create_inference_dataset.py
 
 ## 2. Create graph
 # TODO: could cache this, although that isn't implemented at the moment
-uv run python -m neural_lam.create_graph --config_path ${INFERENCE_WORKDIR}/config.yaml \
+${UV_CMD} python -m neural_lam.create_graph --config_path ${INFERENCE_WORKDIR}/config.yaml \
     --name ${GRAPH_NAME} ${CREATE_GRAPH_ARG}
 
 ## 3. Run inference
 # NB: parallel write of zarr over multiple GPUs not implemented yet, so can ony use one gpu for now
-uv run python -m neural_lam.train_model --config_path ${INFERENCE_WORKDIR}/config.yaml \
+${UV_CMD} python -m neural_lam.train_model --config_path ${INFERENCE_WORKDIR}/config.yaml \
     --eval test\
-    --devices 1\
+    --devices 0\
     --graph ${GRAPH_NAME} \
     --hidden_dim ${NUM_HIDDEN_DIMS} \
     --ar_steps_eval ${NUM_EVAL_STEPS} \
@@ -113,7 +138,7 @@ uv run python -m neural_lam.train_model --config_path ${INFERENCE_WORKDIR}/confi
 # means that we will have `danra_surface.zarr` in this case. We rename name
 # that manually here but maybe mllam-data-prep should be able to merge inputs
 # originating from the same zarr dataset path?
-uv run python -m mllam_data_prep.recreate_inputs \
+${UV_CMD} python -m mllam_data_prep.recreate_inputs \
     --config-path ${INFERENCE_WORKDIR}/danra.datastore.yaml \
     --output-path-format "${OUTPUT_DATASETS_ROOT_PATH}/{input_name}.zarr" \
     ${OUTPUT_DATASETS_ROOT_PATH}/inference_output.zarr
