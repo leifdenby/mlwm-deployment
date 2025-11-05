@@ -383,6 +383,24 @@ def _prepare_all_inference_dataset_zarr(
 def _create_inference_config(
     fps_inference_datastore_config: Dict[str, str], fp_inference_workdir: str
 ) -> str:
+    """
+    Create the inference config file for neural-lam, updating the datastore
+    config paths to point to the inference datastore config files.
+
+    Parameters
+    ----------
+    fps_inference_datastore_config : Dict[str, str]
+        A dictionary of datastore names and the path to their corresponding
+        inference datastore config file.
+    fp_inference_workdir : str
+        The path to the inference working directory, where the inference
+        config file will be saved.
+
+    Returns
+    -------
+    str
+        The path to the inference config file.
+    """
     training_config = NeuralLAMConfig.from_yaml_file(FP_TRAINING_CONFIG)
     inference_config = copy.deepcopy(training_config)
 
