@@ -47,7 +47,7 @@ ENV PATH="/root/.local/bin:$PATH"
 
 # export current torch version to constraints file
 RUN python -c 'import torch; print(f"torch=={torch.__version__}")' > constraints.txt
-# install with constraints  
+# install with constraints
 RUN uv pip install --break-system-packages --system --constraints constraints.txt .
 
 ENTRYPOINT ["/bin/bash"]
