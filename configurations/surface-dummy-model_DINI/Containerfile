@@ -10,7 +10,7 @@ COPY entry.sh ./
 COPY src/ ./src
 
 # Download inference artifact from S3
-ARG DEFAULT_ARTIFACT="s3://mlwm-artifacts/inference-artifacts/surface-dummy-model_DINI.zip"
+ARG DEFAULT_ARTIFACT="s3://mlwm-artifacts/inference-artifacts/surface-dummy-model.zip"
 ENV MLWM_INFERENCE_ARTIFACT=${DEFAULT_ARTIFACT}
 
 # Install awscli
