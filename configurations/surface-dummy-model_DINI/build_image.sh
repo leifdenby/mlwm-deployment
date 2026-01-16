@@ -32,7 +32,7 @@ if [ "$(uname -m)" = "aarch64" ]; then
 	MLWM_BASE_IMAGE="${CR_URL}/nvidia/pytorch:25.09-py3"
 else
 	echo "Info: Using x86_64 base image."
-	MLWM_BASE_IMAGE="$CR_URL/pytorchlightning/pytorch_lightning:base-cuda-py3.12-torch2.6-cuda12.4.1"
+	MLWM_BASE_IMAGE="${CR_URL}/pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime"
 fi
 
 # Check AWS credentials if S3 access is needed
