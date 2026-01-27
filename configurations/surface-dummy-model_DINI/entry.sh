@@ -33,6 +33,12 @@ if [ -f .env ] ; then
     set -a && source .env && set +a
 fi
 
+## Model specific inference configuration (same across all executions)
+NUM_HIDDEN_DIMS=2
+GRAPH_NAME="multiscale"
+HIEARCHICAL_GRAPH=false
+MODEL_TIMESTEP="PT3H"  # model trained on 3-hourly data
+
 # set default override of input paths in the datastore config used for creating the
 # inference dataset if environment variable isn't set
 DATASTORE_INPUT_PATHS=${DATASTORE_INPUT_PATHS:-"\
@@ -54,11 +60,7 @@ echo "  FORECAST_DURATION=${FORECAST_DURATION}"
 echo "  NUM_EVAL_STEPS=${NUM_EVAL_STEPS}"
 echo "  INFERENCE_WORKDIR=${INFERENCE_WORKDIR}"
 
-## Model specific inference configuration (same across all executions)
-NUM_HIDDEN_DIMS=2
-GRAPH_NAME="multiscale"
-HIEARCHICAL_GRAPH=false
-
+# set cli argument for creating hierarchical graph if needed
 if [ "$HIEARCHICAL_GRAPH" = true ] ; then
     CREATE_GRAPH_ARG="--hierarchical"
 else

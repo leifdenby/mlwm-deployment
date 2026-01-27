@@ -5,6 +5,18 @@ surface variables from DANRA, only 10 days of data and only trained 10
 epochs. It is intended only as a demonstration of the inference pipeline and is
 expected to give very poor results.
 
+## Building image and running inference
+
+To build the image on "superjuice" (`27sj894.dmi.dk`) we need to set the AWS tokens to read the inference artifact and also use the local http proxy for pulling the base image:
+
+```bash
+export AWS_SECRET_ACCESS_KEY=<secret-key-to-read-inference-artifact>
+export AWS_ACCESS_KEY_ID=<access-key-to-read-inference-artifact>
+export MLWM_PULL_PROXY=http://squid1.dmi.dk:3128
+```
+
+
+
 ## Upstream package change requirements
 
 Relative to the `main` branch on both github.com/mllam/mllam-data-prep and
