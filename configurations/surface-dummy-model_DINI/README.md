@@ -7,6 +7,10 @@ expected to give very poor results.
 
 ## Building image and running inference
 
+Currently building the image and running inference is only supported on the "superjuice" machine (`27sj894.dmi.dk`).
+
+### Building the image
+
 To build the image on "superjuice" (`27sj894.dmi.dk`) we need to set the AWS tokens to read the inference artifact and also use the local http proxy for pulling the base image:
 
 ```bash
@@ -15,10 +19,21 @@ export AWS_ACCESS_KEY_ID=<access-key-to-read-inference-artifact>
 export MLWM_PULL_PROXY=http://squid1.dmi.dk:3128
 ```
 
-GPU access with rootless Podman (current workaround)
+Then build the image with:
 
-On this system we are using rootless Podman without sudo access.
-In this configuration, the standard Podman/Docker flag:
+```bash
+./build_image.sh
+```
+
+### Running inference
+
+On "superjuice" (`27sj894.dmi.dk`), run inference for a given analysis time (e.g. `2019-02-04T12:00`) and forecast duration (e.g. `PT18H`) using DINI initial conditions (read from AWS S3) with:
+
+```bash
+./run_inference_container.sh 2019-02-04T12:00 PT18H
+```
+
+Currently this script uses a workaround to get GPU access with rootless Podman. This is required because the necessary system-level NVIDIA Container Toolkit integration is not available on this system. This means that the standard Podman/Docker flag:
 
   --gpus all
 

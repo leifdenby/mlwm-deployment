@@ -45,6 +45,9 @@ ENV PATH="/root/.local/bin:$PATH"
 # RUN uv venv create -p 3.11 --system-site-packages --clear
 # RUN uv sync
 
+ARG UV_INSTALL_CACHEBUST=1
+RUN echo "uv-cachebust=${UV_INSTALL_CACHEBUST}" >/dev/null
+
 # export current torch version to constraints file
 RUN python -c 'import torch; print(f"torch=={torch.__version__}")' > constraints.txt
 # install with constraints

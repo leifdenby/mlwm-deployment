@@ -36,10 +36,10 @@ fi
 USE_UV=${USE_UV:-true}
 if [ "$USE_UV" = true ] ; then
     echo "Using uv to run commands"
-    uv_cmd="uv run"
+    UV_CMD="uv run"
 else
     echo "Not using uv to run commands, using plain python"
-    uv_cmd=""
+    UV_CMD=""
 fi
 
 # print CUDA debug info
@@ -58,6 +58,12 @@ if torch.cuda.is_available():
         print("cuda op failed:", e)
 PY
 
+## Model specific inference configuration (same across all executions)
+NUM_HIDDEN_DIMS=2
+GRAPH_NAME="multiscale"
+HIEARCHICAL_GRAPH=false
+MODEL_TIMESTEP_HOURS=3
+
 # set default override of input paths in the datastore config used for creating the
 # inference dataset if environment variable isn't set
 DATASTORE_INPUT_PATHS=${DATASTORE_INPUT_PATHS:-"\
@@ -65,10 +71,22 @@ danra.danra_surface=https://object-store.os-api.cci1.ecmwf.int/danra/v0.6.0dev1/
 danra.danra_static=https://object-store.os-api.cci1.ecmwf.int/danra/v0.5.0/single_levels.zarr/"}
 TIME_DIMENSIONS=${TIME_DIMENSIONS:-"analysis_time,elapsed_forecast_duration"}
 ANALYSIS_TIME=${ANALYSIS_TIME:-"2019-02-04T12:00"}  # assumed to be in UTC
-# forecast out to 18 hours, which means 6 steps of 3 hours each (the model was
-# trained on 3-hourly analysis data)
+# default forecast duration of 18 hours
 FORECAST_DURATION=${FORECAST_DURATION:-"PT18H"}
-NUM_EVAL_STEPS=${NUM_EVAL_STEPS:-6}
+
+# compute number of eval steps from forecast duration
+if [ -z "${NUM_EVAL_STEPS}" ] ; then
+    # check that FORECAST_DURATION is in expected format PT{N}H
+    if [[ "${FORECAST_DURATION}" =~ ^PT([0-9]+)H$ ]] ; then
+        HOURS="${BASH_REMATCH[1]}"
+        NUM_EVAL_STEPS=$((HOURS / MODEL_TIMESTEP_HOURS))
+        echo "Inferred NUM_EVAL_STEPS=${NUM_EVAL_STEPS} from FORECAST_DURATION=${FORECAST_DURATION}"
+    else
+        echo "ERROR: Cannot infer NUM_EVAL_STEPS from FORECAST_DURATION='${FORECAST_DURATION}', please set NUM_EVAL_STEPS explicitly"
+        exit 1
+    fi
+fi
+
 # All working directories (for input data, output data, intermediate files)
 # will be created under INFERENCE_WORKDIR
 INFERENCE_WORKDIR=${INFERENCE_WORKDIR:-"./inference_workdir"}
@@ -81,11 +99,7 @@ echo "  FORECAST_DURATION=${FORECAST_DURATION}"
 echo "  NUM_EVAL_STEPS=${NUM_EVAL_STEPS}"
 echo "  INFERENCE_WORKDIR=${INFERENCE_WORKDIR}"
 
-## Model specific inference configuration (same across all executions)
-NUM_HIDDEN_DIMS=2
-GRAPH_NAME="multiscale"
-HIEARCHICAL_GRAPH=false
-
+# set cli argument for creating hierarchical graph if needed
 if [ "$HIEARCHICAL_GRAPH" = true ] ; then
     CREATE_GRAPH_ARG="--hierarchical"
 else
