@@ -159,4 +159,4 @@ adds:
 
   - needs its own branch and PR
 
-- `torch >= 2.6.0` defaults to `weights_only=True` when loading checkpoints 
+- `torch >= 2.6.0` defaults to `weights_only=True` when loading checkpoints
