@@ -1,0 +1,167 @@
+# Plan: run ANNA (gefion-1) with DINI initial and boundary conditions
+
+## Context
+The goal is to run ANNA end to end in its container, with the interior initial state and the boundary forcing both taken from DINI control runs at `s3://harmonie-zarr/dini/control/{YYYY-MM-DDTHHMMSSZ}/{single,pressure}_levels.zarr`.
+
+Current state (branch `add-anna`, commit `dc0f545`): the image builds, but `entry.sh` stops after creating the inference dataset. There's no graph creation, no eval and no back-transform.
+
+The only ANNA artifact, `s3://mlwm-artifacts/inference-artifacts/gefion-1.zip`, contains:
+- `checkpoint.pkl`
+- `configs/7deg_config.yaml`
+- `configs/danra_model1_config.yaml`
+- `stats/danra_model1_config.stats.zarr`
+
+It has **no boundary datastore config or stats**, because `_find_datastore_paths` (`src/mlwm/build_inference_artifact.py`) skips `datastore_boundary`.
+
+## Training provenance (recovered)
+- **Run:** wandb [`jo-research-team/neural_lam/n0o7jw5f`](https://wandb.ai/jo-research-team/neural_lam/runs/n0o7jw5f) (`train-hi_lam-2x300-02_27_15-4034`, Gefion, 80 epochs from scratch). The run [`hfzfhiha`](https://wandb.ai/jo-research-team/neural_lam/runs/hfzfhiha) is a different one: a 3-epoch `7deg_rect_hi4` fine-tune. Neither logged the boundary config.
+- **Checkpoint hyperparameters:**
+  - `hi_lam`, graph `7deg_rect_hi3`, `hidden_dim=300`, `hidden_dim_grid=150`, `time_delta_enc_dim=32`, `dynamic_time_deltas=True`, `processor_layers=2`
+  - 1 past and 1 future forcing/boundary step
+  - input widths: interior 127, boundary 272
+- **Code:** [`joeloskarsson/neural-lam-dev`](https://github.com/joeloskarsson/neural-lam-dev), commit `e7d11c9` (2025-02-17), an ancestor of the `research` branch.
+- **Configs in that repo** (`research` branch, `scripts/`):
+  - `danra_era5_config.yaml` is **the boundary config**. It matches the `MDPDatastore` pickled in `checkpoint.pkl` field for field:
+    - ERA5 at PT6H
+    - `domain_cropping` with a 7.19° margin around the DANRA interior, interior points excluded, giving 18014 points
+    - 58 forcing features: `era5_sl` (mslp, t2m, u10, v10, sp, plus derived toa_radiation and hour/day sin/cos) and `era5_pl` (z, t, q, u, v, w at 100/200/400/600/700/850/925/1000 hPa)
+    - 2 static features (`land_sea_mask`, `geopotential_at_surface`)
+    - PlateCarree projection
+  - `danra_model_config_era5.yaml` equals the artifact's `7deg_config.yaml`, and `danra_interior_config.yaml` is the interior config.
+- **ERA5 source** (`scripts/era_download.py`): WeatherBench2 `gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr` (public), subset by lon/lat box and levels.
+- **Graph** (`scripts/danra_build_graphs.sh`): `python -m neural_lam.build_rectangular_graph --config_path <nl config> --mesh_node_distance 12500 --archetype hierarchical --max_num_levels 3 --graph_name 7deg_rect_hi3`
+- **Eval** (`scripts/danra_eval.sh`): `train_model --hidden_dim 300 --hidden_dim_grid 150 --time_delta_enc_dim 32 --model hi_lam --processor_layers 2 --graph_name ... --load ... --eval test`, plus `--save_eval_to_zarr_path` (available on `research`).
+- **Dependency conflict:**
+  - The current pin `khintz/neural-lam@dev/first-inference-image` **can't load ANNA**: it has no `hidden_dim_grid`, `time_delta_enc_dim`, boundary steps or `graph_name`.
+  - `research` requires `sadamov/mllam-data-prep@building-ml-lams` (`latlon-domain-crop` extra), while `create_inference_dataset.py` uses `leifdenby/mllam-data-prep@feat/inference-cli-args`.
+- **Still missing:** the boundary train stats and the exact 18014 boundary lat/lon. Both are only on Gefion (`/dcai/projects/cu_0003/data/sources/era5/era_danra_model1_subset.zarr`), but both can be reproduced from WB2 ERA5, the DANRA grid and the config above.
+
+## DINI facts (probed on `2026-09-26T180000Z`)
+- 2 km Lambert, 1906×1606, hourly T+0..T+36, lat 37.7–69.9°N.
+- `single_levels`: has every interior surface state variable (`pres_seasurface t2m u10m v10m pres0m lwavr0m swavr0m`), plus `lsm` and `orography`.
+- `pressure_levels`: `z t r u v tw` on 14 levels, including all 8 needed. The `pressure` coordinate has no units attribute.
+  - `tw` is **geometric vertical velocity** w in m/s (`paramId 260238`). ERA5 `vertical_velocity` is pressure vertical velocity ω in Pa/s, so it has to be converted: ω ≈ −ρ·g·w, with ρ = p / (R_d·T_v).
+  - `r` is in **%**. DANRA/training uses a fraction (clamped to [0, 1]), so divide by 100.
+  - Verified against DANRA v0.5.0 and the `gefion-1` train stats:
+    - DANRA `tw` is labelled "Vertical velocity", `upward_air_velocity`, m/s. Its train std per level (0.046 @100, 0.093 @400, 0.112 @850, 0.065 @1000 hPa) matches DINI `tw` (0.046, 0.111, 0.134, 0.072 on 2026-09-27T00Z), so it's the same quantity and goes into the interior unchanged. DANRA has no separate `w`.
+    - DANRA `r` is **mislabelled** as `%` but stored as a fraction (train means 0.04–0.79). DINI `r` really is in % (means 2.6–78, max 100).
+- `height_levels`: `r t u v`.
+- **No specific humidity.** q can be derived from r, t and p.
+
+## Decisions
+- Interior: regrid DINI onto the DANRA grid.
+- Initial states: T+0 and T+3h of the same DINI run, so the first ANNA prediction is valid at T+6h.
+- Vertical velocity: derive ERA5-style ω (Pa/s) from DINI `tw` (m/s). This replaces the earlier idea of filling it with the train mean; DINI already has it.
+
+## Steps
+
+### 1. Boundary datastore configs (do this first)
+These configs define exactly which fields, levels, grid and dims each boundary source must provide. They're the spec to extend the GRIB→zarr conversion tool against for IFS GRIB files. Put them in `configurations/ANNA/configs/`:
+- **`era_7deg_model1_config.yaml`** is the training boundary config, recovered from the checkpoint and matching `neural-lam-dev@research:scripts/danra_era5_config.yaml`. Keep the training time range and splits: it's the reference that defines the feature order and the ERA5 train stats (`overload_stats_path` target), and step 3 uses it to reproduce the stats. Paths get rewritten to `era5.zarr` + `danra_model1_config.yaml`.
+- **`ifs_7deg_model1_config.yaml`** is the operational IFS boundary, adapted from `danra_ifs_config.yaml`:
+  - inputs `ifs_sl` / `ifs_pl` with the variables and levels in the table in step 9
+  - dims `[time, prediction_timedelta, longitude, latitude(, level)]`, mapped to `analysis_time` / `elapsed_forecast_duration`
+  - `domain_cropping` 7.19° around `danra_model1_config.yaml`
+  - statics (`land_sea_mask`, `geopotential_at_surface`) from IFS itself rather than ERA5, so the operational setup has one source. Keep the ERA5 `era_static` input as a commented alternative.
+  - Placeholder `path: ifs.zarr`; `create_inference_dataset.py` overrides it at run time.
+  - A header comment listing, per field, the IFS shortName/paramId, units and the zarr variable/dim names the converter must write. This is the contract for the converter.
+- **`dini_7deg_model1_config.yaml`** is the DINI boundary. It uses the same ERA5-named variables, read from the `boundary.zarr` that `regrid_dini.py` writes (step 4), so it's structurally the ERA5 config with a different path and no `domain_cropping`, since that zarr is pre-cropped.
+- **neural-lam configs** `7deg_config_{era5,ifs,dini}.yaml`: `datastore` = `danra_model1_config.yaml`, `datastore_boundary` = the matching boundary config, and for `ifs`/`dini`, `overload_stats_path: era_7deg_model1_config.yaml`.
+- **Validation:** load each config with the pinned mdp (step 2). For the IFS config, also build a tiny synthetic `ifs.zarr` with the expected variable/dim names, run `mdp.create_dataset`, and check it gives 58 forcing + 2 static features, in the same order as the ERA5 config (feature order must match the checkpoint).
+
+### 2. Switch neural-lam and mdp to the training lineage (`configurations/ANNA/pyproject.toml`)
+- `neural-lam` → `joeloskarsson/neural-lam-dev@research`, pinned to a sha that includes `e7d11c9`.
+- `mllam-data-prep` → a branch with both `domain_cropping` (sadamov `building-ml-lams`) and the inference CLI args (leifdenby `feat/inference-cli-args`). Check whether they can be merged, or whether one branch already has both. **This is the riskiest dependency step.** Step 1's configs can be written in parallel, but their validation needs this step.
+
+### 3. Complete the artifact locally (no upload for now)
+- Fix `_find_datastore_paths` so it includes `datastore_boundary`, and add a test in `src/mlwm/tests/`. That way a future re-build on Gefion is complete.
+- Assemble a local artifact directory `configurations/ANNA/inference_artifact/` (gitignored) from `gefion-1.zip` plus:
+  - the step 1 configs (`configs/era_7deg_model1_config.yaml`, `ifs_…`, `dini_…`, and the neural-lam config variants)
+  - `stats/era_7deg_model1_config.stats.zarr` and `grids/era_7deg_model1_config.grid.zarr` (boundary lat/lon)
+- **Boundary stats + lat/lon.** Preferred: export them on Gefion from `era_danra_model1_subset.zarr` and copy them in. Fallback `src/mlwm/recompute_boundary_stats.py`:
+  - Run mdp on WB2 ERA5 with the recovered config over the train split (2000-01-01..2018-10-29, 6-hourly).
+  - Assert 18014 grid points.
+- Add a small script (e.g. `configurations/ANNA/dev-utils/assemble_artifact.sh`) that downloads `gefion-1.zip` and adds the extra files, so the directory can be reproduced.
+- `Containerfile`: add `ARG ARTIFACT_SOURCE=local`. When `local`, `COPY inference_artifact/` into the image instead of the S3 download. Keep the S3 path for later, when the completed artifact is uploaded (e.g. as `gefion-2.zip`).
+
+### 4. `src/regrid_dini.py` (new, runs before `create_inference_dataset.py`)
+- **Interior:** DINI → DANRA grid (bilinear via lat/lon, DANRA grid cached in the image), every 3 h, DANRA names, `pressure` units set to hPa, and `r` converted from % to a fraction. `tw` passes through unchanged (verified to be the same quantity). For the other variables, compare DINI magnitudes against the train stats rather than trusting the unit labels. Writes `interior.zarr`.
+- **Boundary:** DINI → the 18014 ERA5 points, every 6 h, with ERA5 names:
+  - `pres_seasurface`→`mean_sea_level_pressure`, `t2m`→`2m_temperature`, `u10m/v10m`→`10m_{u,v}_component_of_wind`, `pres0m`→`surface_pressure`
+  - `z t u v`→`geopotential temperature {u,v}_component_of_wind`, with `pressure`→`level`
+  - `specific_humidity` derived from `r/100, t, p`
+  - `vertical_velocity` (ω, Pa/s) = −(p / (R_d·T_v))·g·`tw`, with T_v from `t` and q
+  - `lsm`→`land_sea_mask`, `orography`×g→`geopotential_at_surface`
+  - Check the ERA5-side units against WB2 (e.g. `geopotential` in m²/s² vs DINI `z`).
+  - Writes `boundary.zarr`.
+- Fail if any boundary point falls outside the DINI domain. This **will** trip on the northern edge (boundary up to 71.6°N, DINI up to 69.9°N); see Open issues.
+
+### 5. `src/create_inference_dataset.py`
+- `FP_TRAINING_CONFIG` → `inference_artifact/configs/7deg_config.yaml` (the current `config.yaml` doesn't exist).
+- Also rewrite `datastore_boundary.config_path`, not just `datastore`/`datastores`.
+- Keep per-datastore time steps in `coord_ranges` (PT3H interior, PT6H boundary), plus one extra boundary step for `num_future_boundary_steps=1`.
+- Disable `domain_cropping` for pre-cropped boundary input.
+- Remove the unused `drop_time_inputs`.
+
+### 6. `entry.sh`: add graph, eval and back-transform
+- `build_rectangular_graph` with the recipe above. Cache the graph in the image, since it's deterministic.
+- `train_model --eval test --model hi_lam --graph_name 7deg_rect_hi3 --hidden_dim 300 --hidden_dim_grid 150 --time_delta_enc_dim 32 --processor_layers 2 --num_past_forcing_steps 1 --num_future_forcing_steps 1 --num_past_boundary_steps 1 --num_future_boundary_steps 1 --ar_steps_eval N --load inference_artifact/checkpoint.pkl --save_eval_to_zarr_path ...`
+- `recreate_inputs` → `single_levels.zarr` / `pressure_levels.zarr`.
+
+### 7. `run_inference_container.sh`
+- Point `DATASTORE_INPUT_PATHS` at `interior.zarr` and `boundary.zarr`.
+- Pass AWS credentials at run time instead of baking them into image `ENV`.
+- Fix the `dt.astim$ezone` typo in the macOS date fallback.
+
+### 8. Document the gaps
+Add a "Known gaps" section to `README.md`:
+- Boundary ω is derived from DINI geometric w (`tw`), using a hydrostatic approximation.
+- The first prediction is valid at T+6h.
+- The boundary comes from DINI, not ERA5.
+
+Link the wandb run and `neural-lam-dev/scripts/` for provenance.
+
+### 9. Alternative boundary: operational IFS (config variant `ANNA-IFS`)
+The configs come from step 1. This step covers data availability and run-time wiring.
+Based on `neural-lam-dev@research:scripts/danra_ifs_config.yaml` and `danra_model_config_ifs.yaml`, which were written for this model family:
+- Same 58 features and variable names as the ERA5 boundary, on the same 0.25° grid with the same `domain_cropping` (7.19°).
+- Forecast-format dims: `analysis_time` (from IFS `time`) × `elapsed_forecast_duration` (from `prediction_timedelta`). The derived forcings take `lead_time`.
+- The neural-lam config sets `datastore_boundary.overload_stats_path` to the ERA5 boundary config, so **IFS is normalised with the ERA5 train stats**. The gefion-1 checkpoint is reused as is, but the ERA5 boundary stats from step 3 are needed here too.
+
+**IFS fields needed in the DMI bucket** (all instantaneous, no accumulations):
+
+| group | ERA5/WB2 name used in config | IFS shortName (paramId) | levels |
+|---|---|---|---|
+| surface | `mean_sea_level_pressure` | `msl` (151) | – |
+| surface | `2m_temperature` | `2t` (167) | – |
+| surface | `10m_u_component_of_wind` | `10u` (165) | – |
+| surface | `10m_v_component_of_wind` | `10v` (166) | – |
+| surface | `surface_pressure` | `sp` (134) | – |
+| pressure | `geopotential` | `z` (129) | 100, 200, 400, 600, 700, 850, 925, 1000 hPa |
+| pressure | `temperature` | `t` (130) | same 8 levels |
+| pressure | `specific_humidity` | `q` (133) | same 8 levels |
+| pressure | `u_component_of_wind` | `u` (131) | same 8 levels |
+| pressure | `v_component_of_wind` | `v` (132) | same 8 levels |
+| pressure | `vertical_velocity` (ω, **Pa/s**) | `w` (135) | same 8 levels |
+| static | `land_sea_mask` | `lsm` (172) | – (our IFS config takes it from IFS; the reference config uses ERA5) |
+| static | `geopotential_at_surface` | `z` (129) on the surface | – (our IFS config takes it from IFS; the reference config uses ERA5) |
+
+That's 5 + 6×8 = 53 raw forcing fields plus 2 statics. The remaining 5 features (`toa_radiation` and hour-of-day/day-of-year sin/cos) are computed by mdp.
+
+- **Grid:** regular 0.25° lat/lon, box **lat 40.25–71.75, lon −19.5–32.0** (DANRA extent 47.65–64.42°N, −12.14–24.58°E, plus 7.19°, rounded outward).
+- **Lead times:** 0 h to at least the ANNA forecast length + 6 h. The training boundary step is 6 h; 3-hourly is fine and gets subsampled.
+- **Cycles:** 00/12 UTC is enough (06/18 are fine too). At run time, pick the latest IFS cycle at or before the DINI analysis time and offset the lead times.
+- **Units:** as in ERA5 (z in m²/s², q in kg/kg, w in Pa/s), with mdp dim names `time, prediction_timedelta, longitude, latitude, level`.
+
+Implementation (the configs themselves are in step 1):
+- An `ANNA_BOUNDARY=dini|ifs` switch in `entry.sh` / `run_inference_container.sh`. The `ifs` path skips the boundary half of `regrid_dini.py`.
+
+## Open issues
+- **DINI doesn't cover the full boundary ring.** DINI reaches 69.9°N, but the boundary needs up to 71.6°N. The DINI-boundary option (step 4) needs a fallback for the northern points (e.g. IFS, or nearest-neighbour fill), or it has to be restricted. This makes IFS the more robust boundary source.
+
+## Verification
+1. `uv run pytest src/mlwm/tests`.
+2. If stats are recomputed: run the same method on the interior, compare against `danra_model1_config.stats.zarr` as a check, and confirm 18014 boundary points.
+3. Run `regrid_dini.py` for `2026-09-26T180000Z`. Check 55 interior and 58 boundary features, no NaNs, and normalised mean/std roughly 0/1.
+4. Load the checkpoint with the pinned neural-lam: the state_dict must load strictly (interior embedder 127, boundary embedder 272).
+5. `./build_image.sh`, then `MLWM_DEBUGGER=ipdb ./run_inference_container.sh 2026-09-26T18:00:00Z PT18H` on a GPU host. Check that the output zarrs exist and that t2m/mslp at T+6..T+18 look sensible against DINI.
