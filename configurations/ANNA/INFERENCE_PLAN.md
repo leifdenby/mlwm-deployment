@@ -112,7 +112,11 @@ Original step description:
   - the checkpoint, sanitised with `dev-utils/sanitize_checkpoint.py` (see step 2)
   - `stats/era_7deg_model1_config.stats.zarr` and `grids/era_7deg_model1_config.grid.zarr` (boundary lat/lon)
 - **ERA5 stats datastore zarr.** `overload_stats_path` makes neural-lam open `era_7deg_model1_config.zarr` next to the configs. It must contain at least `splits` (train/val/test), the `forcing_feature`/`static_feature` coordinates, and `{forcing,static}__train__{mean,std}` plus `forcing__train__diff_{mean,std}`. The zarr must be newer than the config, or neural-lam logs a warning. If it's missing, neural-lam tries to build the full 2000–2020 ERA5 dataset.
-- **Boundary stats + lat/lon.** Preferred: export them on Gefion from `era_danra_model1_subset.zarr` and copy them in. Fallback `src/mlwm/recompute_boundary_stats.py`:
+- **Checked Kasper's `ablation-studies.tgz`** (a local copy of the ablation-studies directory):
+  - Its `configs/{danra_model1,era_7deg_model1}_config.zarr` are **2-day test datastores** (2010-01-01..03, one-day "train" split, zarr v3). Their stats are *not* the training stats: the interior ones differ from the gefion-1 artifact stats, e.g. mslp mean 100,647 vs 101,308 Pa. Don't use them.
+  - `era_subset/era_danra_model1_subset.zarr` also covers only 2010-01-01..03. It does have the exact training ERA5 grid, 187 lat × 267 lon at 0.25° (lat 79.25–32.75, lon 0–359.75 wrapping around Greenwich).
+  - With that grid and the `grid_index` values kept in the checkpoint's pickled boundary datastore (stacked `[longitude, latitude]`), the **exact 18014 boundary points are recovered**: lat 40.50–71.50, lon −26.25–39.50. That's the boundary lat/lon part of this step done.
+- **Boundary stats: still missing.** Preferred: export `{forcing,static}__train__*` and `splits` from the real training datastore on Gefion (`/dcai/projects/cu_0003/user_space/hinkas/git-repos/ablation-studies/configs/era_forcing/era_7deg_model1_config.zarr`, next to the config the checkpoint references). Otherwise, export on Gefion from `era_danra_model1_subset.zarr` and copy them in. Fallback `src/mlwm/recompute_boundary_stats.py`:
   - Run mdp on WB2 ERA5 with the recovered config over the train split (2000-01-01..2018-10-29, 6-hourly).
   - Assert 18014 grid points.
 - Add a small script (e.g. `configurations/ANNA/dev-utils/assemble_artifact.sh`) that downloads `gefion-1.zip` and adds the extra files, so the directory can be reproduced.
@@ -120,7 +124,7 @@ Original step description:
 
 ### 4. `src/regrid_dini.py` (new, runs before `create_inference_dataset.py`)
 - **Interior:** DINI → DANRA grid (bilinear via lat/lon, DANRA grid cached in the image), every 3 h, DANRA names, `pressure` units set to hPa, and `r` converted from % to a fraction. `tw` passes through unchanged (verified to be the same quantity). For the other variables, compare DINI magnitudes against the train stats rather than trusting the unit labels. Writes `interior.zarr`.
-- **Boundary:** DINI → a regular 0.25° lat/lon box (lat 40.25–71.75, lon −19.5–32.0), every 6 h, following the IFS contract in `configs/ifs_7deg_model1_config.yaml`. `domain_cropping` in `dini_7deg_model1_config.yaml` then selects the boundary points. ERA5 names:
+- **Boundary:** DINI → a regular 0.25° lat/lon box (lat 40.0–72.0, lon −27.0–40.0), every 6 h, following the IFS contract in `configs/ifs_7deg_model1_config.yaml`. `domain_cropping` in `dini_7deg_model1_config.yaml` then selects the boundary points. ERA5 names:
   - `pres_seasurface`→`mean_sea_level_pressure`, `t2m`→`2m_temperature`, `u10m/v10m`→`10m_{u,v}_component_of_wind`, `pres0m`→`surface_pressure`
   - `z t u v`→`geopotential temperature {u,v}_component_of_wind`, with `pressure`→`level`
   - `specific_humidity` derived from `r/100, t, p`
@@ -128,7 +132,7 @@ Original step description:
   - `lsm`→`land_sea_mask`, `orography`×g→`geopotential_at_surface`
   - Check the ERA5-side units against WB2 (e.g. `geopotential` in m²/s² vs DINI `z`).
   - Writes `boundary.zarr`.
-- Fail if any boundary point falls outside the DINI domain. This **will** trip on the northern edge (boundary up to 71.6°N, DINI up to 69.9°N); see Open issues.
+- Fail if any boundary point falls outside the DINI domain. This **will** trip on the northern edge (boundary up to 71.5°N, DINI up to 69.9°N); see Open issues.
 
 ### 5. `src/create_inference_dataset.py`
 - `FP_TRAINING_CONFIG` → `inference_artifact/configs/7deg_config.yaml` (the current `config.yaml` doesn't exist).
@@ -184,7 +188,7 @@ Based on `neural-lam-dev@research:scripts/danra_ifs_config.yaml` and `danra_mode
 
 That's 5 + 6×8 = 53 raw forcing fields plus 2 statics. The remaining 5 features (`toa_radiation` and hour-of-day/day-of-year sin/cos) are computed by mdp.
 
-- **Grid:** regular 0.25° lat/lon, box **lat 40.25–71.75, lon −19.5–32.0** (DANRA extent 47.65–64.42°N, −12.14–24.58°E, plus 7.19°, rounded outward).
+- **Grid:** regular 0.25° lat/lon, box **lat 40.0–72.0, lon −27.0–40.0**. The 18014 training boundary points span lat 40.50–71.50, lon −26.25–39.50; the box adds a 0.5° margin. The 7.19° cropping margin is a great-circle distance, so the ring is much wider in longitude than "DANRA extent ± 7.19°" (an earlier version of this plan had lon −19.5–32.0, which was too narrow).
 - **Lead times:** 0 h to at least the ANNA forecast length + 6 h. The training boundary step is 6 h; 3-hourly is fine and gets subsampled.
 - **Cycles:** 00/12 UTC is enough (06/18 are fine too). At run time, pick the latest IFS cycle at or before the DINI analysis time and offset the lead times.
 - **Units:** as in ERA5 (z in m²/s², q in kg/kg, w in Pa/s), with mdp dim names `time, prediction_timedelta, longitude, latitude, level`.
@@ -193,7 +197,7 @@ Implementation (the configs themselves are in step 1):
 - An `ANNA_BOUNDARY=dini|ifs` switch in `entry.sh` / `run_inference_container.sh`. The `ifs` path skips the boundary half of `regrid_dini.py`.
 
 ## Open issues
-- **DINI doesn't cover the full boundary ring.** DINI reaches 69.9°N, but the boundary needs up to 71.6°N. The DINI-boundary option (step 4) needs a fallback for the northern points (e.g. IFS, or nearest-neighbour fill), or it has to be restricted. This makes IFS the more robust boundary source.
+- **DINI doesn't cover the full boundary ring.** DINI reaches 69.9°N, but the boundary needs up to 71.5°N. The DINI-boundary option (step 4) needs a fallback for the northern points (e.g. IFS, or nearest-neighbour fill), or it has to be restricted. This makes IFS the more robust boundary source.
 
 ## Verification
 1. `uv run pytest src/mlwm/tests`.

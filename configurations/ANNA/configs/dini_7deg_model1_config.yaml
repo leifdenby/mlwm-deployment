@@ -17,7 +17,7 @@
 # Features are normalised with the ERA5 training statistics
 # (`overload_stats_path` in `7deg_config_dini.yaml`).
 #
-# NB: DINI only extends to ~69.9N while the boundary ring extends to ~71.6N,
+# NB: DINI only extends to ~69.9N while the boundary ring extends to ~71.5N,
 # so the northernmost boundary points are not covered by DINI (see "Open
 # issues" in INFERENCE_PLAN.md).
 #
