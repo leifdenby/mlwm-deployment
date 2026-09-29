@@ -25,8 +25,17 @@ Rather than building the (~300 GB) datastore, the training split is streamed
 in blocks of consecutive time steps and per-feature (count, mean, M2)
 accumulators are combined (Chan et al.), in float64 as in training (the
 forcing features are promoted to float64 when stacked with the derived
-features). Each block's accumulators are saved in `--partials-dir`, so an
-interrupted run can be restarted and continues where it stopped.
+features).
+
+Progress and resuming:
+- a progress bar shows the blocks done (including those done in earlier runs),
+  the time range being processed, the amount of data read and the read rate
+- each block's accumulators are written (atomically) to `--partials-dir` as
+  soon as the block is done. Re-running the same command skips finished
+  blocks, so an interrupted run loses at most the block in progress. The raw
+  data is not cached: that would be the full ~9 TB
+- loading a block is retried with backoff (`--max-retries`) on transient
+  network errors
 
 WeatherBench2 stores one global chunk per time step (all 13 levels for
 pressure level variables), so every time step requires reading ~345 MB
@@ -56,6 +65,8 @@ datastore built from a local ERA5 subset):
 import argparse
 import datetime
 import json
+import os
+import time
 from pathlib import Path
 
 import mllam_data_prep as mdp
@@ -64,6 +75,7 @@ import pandas as pd
 import xarray as xr
 from loguru import logger
 from mllam_data_prep.ops.derive_variable import derive_variable
+from tqdm import tqdm
 
 WB2_ERA5 = "gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr"
 DEFAULT_CONFIG = (
@@ -173,8 +185,24 @@ def _combine(acc_a, acc_b):
     return n, mean, m2
 
 
+def _load_with_retries(ds, max_retries):
+    """Load a (remote) dataset, retrying with backoff on transient errors."""
+    for attempt in range(max_retries + 1):
+        try:
+            return ds.load()
+        except Exception as ex:  # network errors come in many types
+            if attempt == max_retries:
+                raise
+            wait = min(30 * 2**attempt, 600)
+            logger.warning(
+                f"loading failed ({type(ex).__name__}: {ex}), retry "
+                f"{attempt + 1}/{max_retries} in {wait}s"
+            )
+            time.sleep(wait)
+
+
 def _process_block(
-    ds, time_index, i0, i1, forcing_features, chunking, fp_partial
+    ds, time_index, i0, i1, forcing_features, chunking, fp_partial, max_retries
 ):
     """
     Accumulate moments for time steps [i0, i1) of the split. Two earlier time
@@ -182,7 +210,7 @@ def _process_block(
     are exact.
     """
     j0 = max(i0 - 2, 0)
-    ds_block = ds.isel(time=slice(j0, i1)).load()
+    ds_block = _load_with_retries(ds.isel(time=slice(j0, i1)), max_retries)
     assert (ds_block.time.values == time_index[j0:i1]).all()
     template = ds_block["2m_temperature"]
     n_own = i1 - i0
@@ -195,7 +223,12 @@ def _process_block(
         acc["x"][i] = _moments(x[-n_own:])
         acc["d1"][i] = _moments(d1[-min(n_own, d1.shape[0]) :])
         acc["d2"][i] = _moments(d2[-min(n_own, d2.shape[0]) :])
-    np.savez(fp_partial, **acc, i0=i0, i1=i1)
+    # write atomically, so that an interrupted run never leaves a partial
+    # block file behind that would be picked up when resuming
+    fp_tmp = fp_partial.with_name(fp_partial.name + ".tmp")
+    with open(fp_tmp, "wb") as fh:
+        np.savez(fh, **acc, i0=i0, i1=i1)
+    os.replace(fp_tmp, fp_partial)
 
 
 def main():
@@ -232,7 +265,21 @@ def main():
         default=1,
         help="process every N-th block only (approximate statistics if > 1)",
     )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=8,
+        help="retries (with backoff, up to 10 min) when loading a block fails",
+    )
     args = parser.parse_args()
+
+    # log through tqdm so log messages don't break the progress bar, and
+    # silence mllam-data-prep's per-feature info messages
+    logger.remove()
+    logger.add(
+        lambda msg: tqdm.write(msg, end=""),
+        filter={"": "INFO", "mllam_data_prep": "WARNING"},
+    )
 
     config = mdp.Config.from_yaml_file(args.config)
     split = config.output.splitting.splits[SPLIT_NAME]
@@ -254,6 +301,16 @@ def main():
 
     ds = _open_source(args.source)
     ds = ds.sel(time=slice(start, end))
+    # WB2 stores one global chunk per time step, so per time step the whole
+    # globe is read for every variable used, whatever the box size
+    used_vars = sorted({f["var"] for f in forcing_features if "var" in f})
+    ds_source = xr.open_zarr(
+        args.source,
+        storage_options=(
+            {"token": "anon"} if args.source.startswith("gs://") else None
+        ),
+    )
+    bytes_per_step = sum(ds_source[v].isel(time=0).nbytes for v in used_vars)
     time_index = ds.time.values
     if not (np.diff(time_index) == step.to_timedelta64()).all():
         raise ValueError(f"source time steps in split are not all {step}")
@@ -282,18 +339,49 @@ def main():
     else:
         fp_run_info.write_text(json.dumps(run_info, indent=2))
 
-    chunking = config.output.chunking
-    for n, i0 in enumerate(blocks):
+    def _fp_partial(i0):
         i1 = min(i0 + args.block_steps, n_steps)
-        fp_partial = args.partials_dir / f"block_{i0:06d}_{i1:06d}.npz"
-        if fp_partial.exists():
-            continue
-        logger.info(
-            f"block {n + 1}/{len(blocks)}: {time_index[i0]} .. {time_index[i1 - 1]}"
-        )
-        _process_block(
-            ds, time_index, i0, i1, forcing_features, chunking, fp_partial
-        )
+        return args.partials_dir / f"block_{i0:06d}_{i1:06d}.npz"
+
+    todo = [i0 for i0 in blocks if not _fp_partial(i0).exists()]
+    n_todo_steps = sum(min(i0 + args.block_steps, n_steps) - i0 for i0 in todo)
+    logger.info(
+        f"{len(blocks) - len(todo)}/{len(blocks)} blocks already done, "
+        f"{len(todo)} to go: ~{n_todo_steps * bytes_per_step / 1e12:.2f} TB "
+        f"to read (uncompressed, {bytes_per_step / 1e6:.0f} MB per time step)"
+    )
+
+    chunking = config.output.chunking
+    t_start = time.monotonic()
+    n_steps_done = 0
+    with tqdm(
+        total=len(blocks),
+        initial=len(blocks) - len(todo),
+        unit="block",
+        dynamic_ncols=True,
+    ) as pbar:
+        for i0 in todo:
+            i1 = min(i0 + args.block_steps, n_steps)
+            pbar.set_description(
+                f"{str(time_index[i0])[:10]}..{str(time_index[i1 - 1])[:10]}"
+            )
+            _process_block(
+                ds,
+                time_index,
+                i0,
+                i1,
+                forcing_features,
+                chunking,
+                _fp_partial(i0),
+                args.max_retries,
+            )
+            n_steps_done += i1 - i0
+            elapsed = time.monotonic() - t_start
+            pbar.set_postfix(
+                read=f"{n_steps_done * bytes_per_step / 1e9:.0f}GB",
+                rate=f"{n_steps_done * bytes_per_step / 1e6 / elapsed:.0f}MB/s",
+            )
+            pbar.update(1)
 
     # combine the block accumulators
     totals = {
