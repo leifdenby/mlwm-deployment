@@ -116,7 +116,13 @@ Original step description:
   - Its `configs/{danra_model1,era_7deg_model1}_config.zarr` are **2-day test datastores** (2010-01-01..03, one-day "train" split, zarr v3). Their stats are *not* the training stats: the interior ones differ from the gefion-1 artifact stats, e.g. mslp mean 100,647 vs 101,308 Pa. Don't use them.
   - `era_subset/era_danra_model1_subset.zarr` also covers only 2010-01-01..03. It does have the exact training ERA5 grid, 187 lat × 267 lon at 0.25° (lat 79.25–32.75, lon 0–359.75 wrapping around Greenwich).
   - With that grid and the `grid_index` values kept in the checkpoint's pickled boundary datastore (stacked `[longitude, latitude]`), the **exact 18014 boundary points are recovered**: lat 40.50–71.50, lon −26.25–39.50. That's the boundary lat/lon part of this step done.
-- **Boundary stats: still missing.** Preferred: export `{forcing,static}__train__*` and `splits` from the real training datastore on Gefion (`/dcai/projects/cu_0003/user_space/hinkas/git-repos/ablation-studies/configs/era_forcing/era_7deg_model1_config.zarr`, next to the config the checkpoint references). Otherwise, export on Gefion from `era_danra_model1_subset.zarr` and copy them in. Fallback `src/mlwm/recompute_boundary_stats.py`:
+- **Boundary stats: recompute from WeatherBench2** (the Gefion training datastore is no longer accessible) with `dev-utils/compute_era5_boundary_stats.py`, to be run on a server with good bandwidth to GCS.
+  - It replicates the training mdp (`sadamov@dd9af481`) exactly: stats are computed **before cropping**, i.e. over the whole ERA5 subset box (187 × 267 points), and **`diff_std` is the std of second differences**, because `calc_stats()` overwrites `ds` when applying `diff_` ops.
+  - It streams restartable blocks with float64 (count, mean, M2) accumulators.
+  - Validated two ways:
+    1. On the 2-day subset against Kasper's mdp-built test datastore: all forcing stats match to about 1e-13 relative, and the statics to about 1e-7 (mdp keeps them in float32).
+    2. The WB2 box selection is bit-identical to `era_danra_model1_subset.zarr` at 2010-01-01T00.
+  - Cost: WB2 has one global chunk per time step, so there are about 345 MB of reads per step, about 9 TB for the full split (about 27,500 steps). `--block-stride N` gives approximate stats from every N-th block. Fallback `src/mlwm/recompute_boundary_stats.py`:
   - Run mdp on WB2 ERA5 with the recovered config over the train split (2000-01-01..2018-10-29, 6-hourly).
   - Assert 18014 grid points.
 - Add a small script (e.g. `configurations/ANNA/dev-utils/assemble_artifact.sh`) that downloads `gefion-1.zip` and adds the extra files, so the directory can be reproduced.
