@@ -94,7 +94,13 @@ SPLIT_NAME = "train"
 
 def _open_source(source):
     storage_options = {"token": "anon"} if source.startswith("gs://") else None
-    ds = xr.open_zarr(source, storage_options=storage_options)
+    return xr.open_zarr(source, storage_options=storage_options)
+
+
+def _select_box(ds):
+    # NB: do this only on small (in time) subsets. Label-based selection with
+    # arrays on the full WB2 store builds a dask graph over all ~92000 time
+    # chunks, which takes minutes of CPU time
     return ds.sel(latitude=SUBSET_LATS, longitude=SUBSET_LONS)
 
 
@@ -210,7 +216,9 @@ def _process_block(
     are exact.
     """
     j0 = max(i0 - 2, 0)
-    ds_block = _load_with_retries(ds.isel(time=slice(j0, i1)), max_retries)
+    ds_block = _load_with_retries(
+        _select_box(ds.isel(time=slice(j0, i1))), max_retries
+    )
     assert (ds_block.time.values == time_index[j0:i1]).all()
     template = ds_block["2m_temperature"]
     n_own = i1 - i0
@@ -299,18 +307,14 @@ def main():
     )
     logger.info(f"{len(static_features)} static features")
 
-    ds = _open_source(args.source)
-    ds = ds.sel(time=slice(start, end))
+    logger.info(f"opening {args.source}")
+    ds_source = _open_source(args.source)
     # WB2 stores one global chunk per time step, so per time step the whole
     # globe is read for every variable used, whatever the box size
     used_vars = sorted({f["var"] for f in forcing_features if "var" in f})
-    ds_source = xr.open_zarr(
-        args.source,
-        storage_options=(
-            {"token": "anon"} if args.source.startswith("gs://") else None
-        ),
-    )
     bytes_per_step = sum(ds_source[v].isel(time=0).nbytes for v in used_vars)
+    logger.info("selecting split time range")
+    ds = ds_source.sel(time=slice(start, end))
     time_index = ds.time.values
     if not (np.diff(time_index) == step.to_timedelta64()).all():
         raise ValueError(f"source time steps in split are not all {step}")
@@ -413,7 +417,7 @@ def main():
             [np.sqrt(m2 / n) if n > 0 else np.nan for n, _, m2 in totals[k]]
         )
 
-    ds_static = ds.isel(time=0)
+    ds_static = _select_box(ds.isel(time=0))
     static_values = np.stack(
         [
             np.asarray(ds_static[f["var"]].values, dtype=np.float64).ravel()
