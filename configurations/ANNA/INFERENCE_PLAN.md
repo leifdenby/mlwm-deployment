@@ -19,7 +19,8 @@ It has **no boundary datastore config or stats**, because `_find_datastore_paths
   - `hi_lam`, graph `7deg_rect_hi3`, `hidden_dim=300`, `hidden_dim_grid=150`, `time_delta_enc_dim=32`, `dynamic_time_deltas=True`, `processor_layers=2`
   - 1 past and 1 future forcing/boundary step
   - input widths: interior 127, boundary 272
-- **Code:** [`joeloskarsson/neural-lam-dev`](https://github.com/joeloskarsson/neural-lam-dev), commit `e7d11c9` (2025-02-17), an ancestor of the `research` branch.
+- **Code:** [`joeloskarsson/neural-lam-dev`](https://github.com/joeloskarsson/neural-lam-dev), commit **`e58e334c`** (2025-02-27, "Add --dynamic_time_deltas flag", `research` branch), from the run's `wandb-metadata.json`. (An earlier version of this plan said `e7d11c9`; that was the commit of the other run, `hfzfhiha`.) Training environment (run `requirements.txt`): torch 2.6.0, pytorch-lightning 2.5.0.post0, mllam-data-prep 0.5.0 (sadamov fork), weather-model-graphs 0.2.0, xarray 2025.1.2, dask 2025.1.0, zarr 2.18.3.
+- **Published paper checkpoint:** neural-lam-dev's README links [Zenodo 15131838](https://zenodo.org/records/15131838) with a `danra_model.ckpt` (281 MB, 2025-04). It may be a later fine-tune of this model; compare it against gefion-1 at some point.
 - **Configs in that repo** (`research` branch, `scripts/`):
   - `danra_era5_config.yaml` is **the boundary config**. It matches the `MDPDatastore` pickled in `checkpoint.pkl` field for field:
     - ERA5 at PT6H
@@ -31,9 +32,9 @@ It has **no boundary datastore config or stats**, because `_find_datastore_paths
 - **ERA5 source** (`scripts/era_download.py`): WeatherBench2 `gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr` (public), subset by lon/lat box and levels.
 - **Graph** (`scripts/danra_build_graphs.sh`): `python -m neural_lam.build_rectangular_graph --config_path <nl config> --mesh_node_distance 12500 --archetype hierarchical --max_num_levels 3 --graph_name 7deg_rect_hi3`
 - **Eval** (`scripts/danra_eval.sh`): `train_model --hidden_dim 300 --hidden_dim_grid 150 --time_delta_enc_dim 32 --model hi_lam --processor_layers 2 --graph_name ... --load ... --eval test`, plus `--save_eval_to_zarr_path` (available on `research`).
-- **Dependency conflict:**
-  - The current pin `khintz/neural-lam@dev/first-inference-image` **can't load ANNA**: it has no `hidden_dim_grid`, `time_delta_enc_dim`, boundary steps or `graph_name`.
-  - `research` requires `sadamov/mllam-data-prep@building-ml-lams` (`latlon-domain-crop` extra), while `create_inference_dataset.py` uses `leifdenby/mllam-data-prep@feat/inference-cli-args`.
+- **Dependency conflict** (resolved in step 2):
+  - The old pin `khintz/neural-lam@dev/first-inference-image` **couldn't load ANNA**: it has no `hidden_dim_grid`, `time_delta_enc_dim`, boundary steps or `graph_name`.
+  - `research` requires `sadamov/mllam-data-prep@building-ml-lams` (`latlon-domain-crop` extra), while `create_inference_dataset.py` used `leifdenby/mllam-data-prep@feat/inference-cli-args`.
 - **Still missing:** the boundary train stats and the exact 18014 boundary lat/lon. Both are only on Gefion (`/dcai/projects/cu_0003/data/sources/era5/era_danra_model1_subset.zarr`), but both can be reproduced from WB2 ERA5, the DANRA grid and the config above.
 
 ## DINI facts (probed on `2026-09-26T180000Z`)
@@ -79,7 +80,28 @@ These configs define exactly which fields, levels, grid and dims each boundary s
 - **neural-lam configs** `7deg_config_{era5,ifs,dini}.yaml`: `datastore` = `danra_model1_config.yaml`, `datastore_boundary` = the matching boundary config, and for `ifs`/`dini`, `overload_stats_path: era_7deg_model1_config.yaml`.
 - **Validation:** load each config with the pinned mdp (step 2). For the IFS config, also build a tiny synthetic `ifs.zarr` with the expected variable/dim names, run `mdp.create_dataset`, and check it gives 58 forcing + 2 static features, in the same order as the ERA5 config (feature order must match the checkpoint).
 
-### 2. Switch neural-lam and mdp to the training lineage (`configurations/ANNA/pyproject.toml`)
+### 2. Switch neural-lam and mdp to the training lineage (`configurations/ANNA/pyproject.toml`) — DONE
+Status: the gefion-1 checkpoint loads strictly (16,666,855 parameters) with the pinned stack, and a one-step `train_model --eval test` runs end to end and writes finite predictions to zarr. This was checked on synthetic data with `dev-utils/check_checkpoint_compat.py --run-eval`.
+
+Pins (in `configurations/ANNA/pyproject.toml`):
+- **neural-lam** → `joeloskarsson/neural-lam-dev@a44d432e` (`research`, 2025-08-22). It contains the training commit `e58e334c`, the fix after it (`8a38350e`), forecast-format boundary loading (`fb820e2a`, needed for IFS) and the DANRA checkpoint dependency pins (`2feaf91d`). Later `research` commits add git submodule entries without a `.gitmodules` URL, which breaks installing from git, and they only change plotting code in `neural_lam/`. `a44d432e` also adds the paper's `scripts/ifs_download.py` and `scripts/interp_na_ifs.py`, a reference for the IFS converter.
+- **mllam-data-prep** → exactly the training version, `sadamov/mllam-data-prep@dd9af481` (`building-ml-lams`, mdp 0.5.0 based), via `[tool.uv] override-dependencies`, because neural-lam-dev pins it by URL. It has `domain_cropping` and `lead_time`.
+  - **Not** the planned leifdenby `feat/inference-cli-args` (mdp 0.7) + cherry-picked `lead_time`. That combination builds, but mdp 0.7 keeps `latitude`/`longitude` as 1D dim coords for regular lat/lon grids instead of per-`grid_index` coords, and neural-lam-dev's `get_lat_lon` fails on the boundary datastore.
+  - Consequence for step 5: sadamov's `create_dataset()` has no `ds_stats` argument, so `create_inference_dataset.py` must merge the training stats into the dataset itself.
+- **zarr** `>=2.18,<3` (training used 2.18.3): neural-lam-dev writes eval output with a zarr v2-style `numcodecs.Blosc` compressor, which zarr 3 rejects. xarray 2025.3 also doesn't support the zarr 3.1 dtype API.
+- **dask** floor lowered to `>=2025.3.0` (neural-lam-dev pins `dask~=2025.3.0`, `xarray~=2025.3.1`, `numpy<2`).
+
+Learned while implementing (needed in later steps):
+- **Sanitise the checkpoint** (`dev-utils/sanitize_checkpoint.py`, step 3). `hyper_parameters["datastore_boundary"]` is the pickled training datastore, with lazy zarr v2 arrays pointing at `/dcai`. It can't be unpickled with zarr 3 and is useless anyway, so drop it and keep `args` and `config`.
+- **`TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1`** must be set in `entry.sh`. Lightning's `load_from_checkpoint` uses torch's default `weights_only` (True since torch 2.6), and the checkpoint holds `argparse.Namespace`/`NeuralLAMConfig` objects.
+- **`--dynamic_time_deltas`** must be passed to `train_model` (it's a `store_true` flag, and ANNA was trained with it on). Also pass `--num_workers >= 1` (neural-lam-dev uses `persistent_workers`).
+- Use **`WANDB_MODE=offline`** (with `WANDB_DIR` in the workdir), not `wandb disabled`. With wandb disabled, `on_test_epoch_end` crashes saving metric plots into a non-existent run dir. Offline mode sends nothing.
+- neural-lam-dev's `main()` is wrapped in `@logger.catch`: **exceptions are logged but the exit code is 0**. `entry.sh` must check that the output zarr exists rather than rely on the exit code.
+- **Never write mdp configs with sorted keys.** `Config.to_yaml_file()` sorts keys by default, which reorders inputs and variables and so changes the feature order the checkpoint expects. Use `to_yaml_file(..., sort_keys=False)` (applies to `create_inference_dataset.py`, step 5).
+- Eval output format: `state(start_time, elapsed_forecast_duration, state_feature, x, y)`. Check that `recreate_inputs` (step 6) accepts it.
+- In the container, torch is constrained to the base image's version (2.10), whereas locally torch 2.14 was used with torch-geometric 2.3.1. Re-check in the container build (step 6).
+
+Original step description:
 - `neural-lam` → `joeloskarsson/neural-lam-dev@research`, pinned to a sha that includes `e7d11c9`.
 - `mllam-data-prep` → a branch with both `domain_cropping` (sadamov `building-ml-lams`) and the inference CLI args (leifdenby `feat/inference-cli-args`). Check whether they can be merged, or whether one branch already has both. **This is the riskiest dependency step.** Step 1's configs can be written in parallel, but their validation needs this step.
 
@@ -87,6 +109,7 @@ These configs define exactly which fields, levels, grid and dims each boundary s
 - Fix `_find_datastore_paths` so it includes `datastore_boundary`, and add a test in `src/mlwm/tests/`. That way a future re-build on Gefion is complete.
 - Assemble a local artifact directory `configurations/ANNA/inference_artifact/` (gitignored) from `gefion-1.zip` plus:
   - the step 1 configs (`configs/era_7deg_model1_config.yaml`, `ifs_…`, `dini_…`, and the neural-lam config variants)
+  - the checkpoint, sanitised with `dev-utils/sanitize_checkpoint.py` (see step 2)
   - `stats/era_7deg_model1_config.stats.zarr` and `grids/era_7deg_model1_config.grid.zarr` (boundary lat/lon)
 - **ERA5 stats datastore zarr.** `overload_stats_path` makes neural-lam open `era_7deg_model1_config.zarr` next to the configs. It must contain at least `splits` (train/val/test), the `forcing_feature`/`static_feature` coordinates, and `{forcing,static}__train__{mean,std}` plus `forcing__train__diff_{mean,std}`. The zarr must be newer than the config, or neural-lam logs a warning. If it's missing, neural-lam tries to build the full 2000–2020 ERA5 dataset.
 - **Boundary stats + lat/lon.** Preferred: export them on Gefion from `era_danra_model1_subset.zarr` and copy them in. Fallback `src/mlwm/recompute_boundary_stats.py`:
@@ -113,6 +136,8 @@ These configs define exactly which fields, levels, grid and dims each boundary s
 - The interior keeps its PT3H `coord_ranges`. The boundary configs (IFS/DINI) are used as-is with only the input paths set. Make sure the boundary store's lead times extend one boundary step past the forecast (`num_future_boundary_steps=1`).
 - For cropping, set `domain_cropping.interior_dataset_config_path` to the inference interior config (relative to CWD), so cropping uses the small inference interior dataset, not full DANRA.
 - Remove the unused `drop_time_inputs`.
+- Merge the training stats into the created dataset in the script. The pinned mdp's `create_dataset()` has no `ds_stats` argument (step 2).
+- Write every config with `to_yaml_file(..., sort_keys=False)`, or the feature order changes (step 2).
 
 ### 6. `entry.sh`: add graph, eval and back-transform
 - `build_rectangular_graph` with the recipe above. Cache the graph in the image, since it's deterministic.

@@ -10,12 +10,10 @@ boundary features must match the ERA5 training boundary exactly, in number and
 order, as that is what the gefion-1 checkpoint expects.
 
 Requires a mllam-data-prep version supporting `domain_cropping` and
-`lead_time` in derived variables, e.g. the `building-ml-lams` branch of
-https://github.com/sadamov/mllam-data-prep:
+`lead_time` in derived variables, i.e. the one pinned in the ANNA
+`pyproject.toml` (sadamov/mllam-data-prep@building-ml-lams):
 
-    MDP="git+https://github.com/sadamov/mllam-data-prep@building-ml-lams"
-    uv run --no-project --with pytest --with pyyaml \
-        --with "mllam-data-prep[latlon-domain-crop] @ $MDP" \
+    uv run --project configurations/ANNA --with pytest \
         pytest configurations/ANNA/tests
 """
 from pathlib import Path
