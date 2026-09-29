@@ -1,0 +1,181 @@
+# Boundary datastore config for running ANNA (gefion-1) with DINI on the
+# boundary.
+#
+# `src/regrid_dini.py` interpolates a DINI control forecast onto a regular
+# 0.25 deg lat/lon grid and writes `boundary.zarr` following exactly the same
+# contract as the IFS boundary (see the header of `ifs_7deg_model1_config.yaml`
+# for variable names, units and dims), so this config only differs from the
+# IFS one in the path and input names. Conversions done by regrid_dini.py:
+#   pres_seasurface -> mean_sea_level_pressure, t2m -> 2m_temperature,
+#   u10m/v10m -> 10m_{u,v}_component_of_wind, pres0m -> surface_pressure,
+#   z/t/u/v -> geopotential/temperature/{u,v}_component_of_wind,
+#   specific_humidity from r (% -> fraction), t and p,
+#   vertical_velocity (omega, Pa s-1) from geometric w (`tw`, m s-1),
+#   lsm -> land_sea_mask, orography * g -> geopotential_at_surface,
+#   `pressure` -> `level`, forecast `time` -> `time` + `prediction_timedelta`.
+#
+# Features are normalised with the ERA5 training statistics
+# (`overload_stats_path` in `7deg_config_dini.yaml`).
+#
+# NB: DINI only extends to ~69.9N while the boundary ring extends to ~71.6N,
+# so the northernmost boundary points are not covered by DINI (see "Open
+# issues" in INFERENCE_PLAN.md).
+#
+# NB: `domain_cropping.interior_dataset_config_path` is resolved relative to the
+# current working directory, not relative to this file.
+
+schema_version: v0.5.0
+dataset_version: v0.1.0
+
+output:
+  variables:
+    static: [grid_index, static_feature]
+    forcing: [analysis_time, elapsed_forecast_duration, grid_index, forcing_feature]
+  # no `coord_ranges`: `boundary.zarr` holds a single DINI cycle, all of which
+  # (all lead times) is used
+  chunking:
+    analysis_time: 1
+    elapsed_forecast_duration: 1
+  splitting:
+    # neural-lam requires train/val/test splits to exist. They are made wide
+    # enough to contain any analysis time, and no statistics are computed as
+    # the ERA5 training statistics are used
+    dim: analysis_time
+    splits:
+      train:
+        start: 2000-01-01T00:00
+        end: 2100-01-01T00:00
+      val:
+        start: 2000-01-01T00:00
+        end: 2100-01-01T00:00
+      test:
+        start: 2000-01-01T00:00
+        end: 2100-01-01T00:00
+  domain_cropping:
+    margin_width_degrees: 7.19
+    interior_dataset_config_path: danra_model1_config.yaml
+    include_interior_points: false
+
+inputs:
+  dini_sl:
+    path: boundary.zarr
+    dims: [time, prediction_timedelta, longitude, latitude]
+    variables:
+      - mean_sea_level_pressure
+      - 2m_temperature
+      - 10m_u_component_of_wind
+      - 10m_v_component_of_wind
+      - surface_pressure
+    derived_variables:
+      # derive variables to be used as forcings, evaluated at the valid time
+      # (analysis time + lead time)
+      toa_radiation:
+        kwargs:
+          time: ds_input.time
+          lead_time: ds_input.prediction_timedelta
+          lat: ds_input.latitude
+          lon: ds_input.longitude
+        function: mllam_data_prep.ops.derive_variable.physical_field.calculate_toa_radiation
+      hour_of_day_sin:
+        kwargs:
+          time: ds_input.time
+          lead_time: ds_input.prediction_timedelta
+          component: sin
+        function: mllam_data_prep.ops.derive_variable.time_components.calculate_hour_of_day
+      hour_of_day_cos:
+        kwargs:
+          time: ds_input.time
+          lead_time: ds_input.prediction_timedelta
+          component: cos
+        function: mllam_data_prep.ops.derive_variable.time_components.calculate_hour_of_day
+      day_of_year_sin:
+        kwargs:
+          time: ds_input.time
+          lead_time: ds_input.prediction_timedelta
+          component: sin
+        function: mllam_data_prep.ops.derive_variable.time_components.calculate_day_of_year
+      day_of_year_cos:
+        kwargs:
+          time: ds_input.time
+          lead_time: ds_input.prediction_timedelta
+          component: cos
+        function: mllam_data_prep.ops.derive_variable.time_components.calculate_day_of_year
+    dim_mapping:
+      analysis_time:
+        method: rename
+        dim: time
+      elapsed_forecast_duration:
+        method: rename
+        dim: prediction_timedelta
+      forcing_feature:
+        method: stack_variables_by_var_name
+        name_format: "{var_name}"
+      grid_index:
+        method: stack
+        dims: [longitude, latitude]
+    target_output_variable: forcing
+
+  dini_pl:
+    path: boundary.zarr
+    dims: [time, prediction_timedelta, longitude, latitude, level]
+    variables:
+      geopotential:
+        level:
+          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
+          units: hPa
+      temperature:
+        level:
+          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
+          units: hPa
+      specific_humidity:
+        level:
+          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
+          units: hPa
+      u_component_of_wind:
+        level:
+          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
+          units: hPa
+      v_component_of_wind:
+        level:
+          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
+          units: hPa
+      vertical_velocity:
+        level:
+          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
+          units: hPa
+    dim_mapping:
+      analysis_time:
+        method: rename
+        dim: time
+      elapsed_forecast_duration:
+        method: rename
+        dim: prediction_timedelta
+      forcing_feature:
+        method: stack_variables_by_var_name
+        dims: [level]
+        name_format: "{var_name}{level}"
+      grid_index:
+        method: stack
+        dims: [longitude, latitude]
+    target_output_variable: forcing
+
+  dini_static:
+    path: boundary.zarr
+    dims: [longitude, latitude]
+    variables:
+      - land_sea_mask
+      - geopotential_at_surface
+    dim_mapping:
+      static_feature:
+        method: stack_variables_by_var_name
+        name_format: "{var_name}"
+      grid_index:
+        method: stack
+        dims: [longitude, latitude]
+    target_output_variable: static
+
+extra:
+  projection:
+    class_name: PlateCarree
+    kwargs:
+      central_longitude: 0.0

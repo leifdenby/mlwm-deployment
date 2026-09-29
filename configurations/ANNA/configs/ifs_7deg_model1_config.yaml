@@ -1,0 +1,244 @@
+# Boundary datastore config for running ANNA (gefion-1) with operational IFS
+# forecasts on the boundary.
+#
+# Adapted from `scripts/danra_ifs_config.yaml` on the `research` branch of
+# https://github.com/joeloskarsson/neural-lam-dev, which was written for this
+# model family. The IFS boundary uses the same features (same names, same
+# order) as the ERA5 boundary ANNA was trained with
+# (`era_7deg_model1_config.yaml`) and is normalised with the ERA5 training
+# statistics (`overload_stats_path` in `7deg_config_ifs.yaml`).
+#
+# Differences from the neural-lam-dev reference config:
+# - statics (`land_sea_mask`, `geopotential_at_surface`) are taken from IFS
+#   itself rather than from ERA5, so the operational setup has one source
+# - no `compute_statistics` (stats come from ERA5), no `coord_ranges` (one
+#   store per cycle) and splits wide enough to cover any analysis time, so the
+#   config can be used as-is with only the input `path`s set at run time
+#
+# =============================================================================
+# CONTRACT FOR THE IFS GRIB -> ZARR CONVERSION
+# =============================================================================
+# One zarr store per IFS cycle (e.g. `.../ifs/{YYYY-MM-DDTHHMMSSZ}/ifs.zarr`,
+# the path below is a placeholder overridden at run time) containing:
+#
+# Coordinates
+#   time                  datetime64, analysis/reference time of the cycle
+#                         (length 1 is fine; 00/12 UTC cycles suffice)
+#   prediction_timedelta  timedelta64, lead time. From 0h to at least the ANNA
+#                         forecast length + 6h, every 6h (3h also fine)
+#   latitude, longitude   1D, regular 0.25 deg grid covering at least
+#                         lat 40.25..71.75, lon -19.5..32.0 (DANRA extent
+#                         47.65..64.42N, -12.14..24.58E plus the 7.19 deg
+#                         cropping margin, rounded outward). Longitude
+#                         convention (0..360 or -180..180) does not matter.
+#                         Coordinate names must be exactly `latitude` and
+#                         `longitude`.
+#   level                 pressure level in hPa, must include
+#                         100, 200, 400, 600, 700, 850, 925, 1000.
+#                         If a `units` attribute is set it must be exactly
+#                         "hPa" (mllam-data-prep checks it).
+#
+# Data variables (all instantaneous, no accumulations; units as ERA5)
+#   name                     IFS shortName (paramId)  units    dims
+#   mean_sea_level_pressure  msl (151)                Pa       time, prediction_timedelta, latitude, longitude
+#   2m_temperature           2t  (167)                K        time, prediction_timedelta, latitude, longitude
+#   10m_u_component_of_wind  10u (165)                m s-1    time, prediction_timedelta, latitude, longitude
+#   10m_v_component_of_wind  10v (166)                m s-1    time, prediction_timedelta, latitude, longitude
+#   surface_pressure         sp  (134)                Pa       time, prediction_timedelta, latitude, longitude
+#   geopotential             z   (129)                m2 s-2   time, prediction_timedelta, level, latitude, longitude
+#   temperature              t   (130)                K        time, prediction_timedelta, level, latitude, longitude
+#   specific_humidity        q   (133)                kg kg-1  time, prediction_timedelta, level, latitude, longitude
+#   u_component_of_wind      u   (131)                m s-1    time, prediction_timedelta, level, latitude, longitude
+#   v_component_of_wind      v   (132)                m s-1    time, prediction_timedelta, level, latitude, longitude
+#   vertical_velocity        w   (135)                Pa s-1   time, prediction_timedelta, level, latitude, longitude
+#   land_sea_mask            lsm (172)                0-1      latitude, longitude
+#   geopotential_at_surface  z   (129) at surface     m2 s-2   latitude, longitude
+#
+# Notes
+# - The order of dims within a variable does not matter, but a variable must
+#   not have any dims beyond those listed for its input below. In particular
+#   the two statics must NOT carry `time`/`prediction_timedelta`/`level`
+#   (take them from step 0 and drop those dims).
+# - `vertical_velocity` is the pressure vertical velocity omega (Pa s-1), as in
+#   ERA5, not geometric w.
+# - `geopotential` is geopotential (m2 s-2), not geopotential height.
+# - toa_radiation and hour-of-day / day-of-year sin/cos are derived by
+#   mllam-data-prep and must not be provided.
+# - That is 5 surface + 6 x 8 pressure-level fields = 53 forcing fields, plus
+#   5 derived = 58 forcing features, plus 2 statics.
+#
+# NB: `domain_cropping.interior_dataset_config_path` is resolved relative to the
+# current working directory, not relative to this file.
+
+schema_version: v0.5.0
+dataset_version: v0.1.0
+
+output:
+  variables:
+    static: [grid_index, static_feature]
+    forcing: [analysis_time, elapsed_forecast_duration, grid_index, forcing_feature]
+  # no `coord_ranges`: each input store holds a single IFS cycle, all of which
+  # (all lead times) is used
+  chunking:
+    analysis_time: 1
+    elapsed_forecast_duration: 1
+  splitting:
+    # neural-lam requires train/val/test splits to exist. They are made wide
+    # enough to contain any analysis time, and no statistics are computed as
+    # the ERA5 training statistics are used
+    dim: analysis_time
+    splits:
+      train:
+        start: 2000-01-01T00:00
+        end: 2100-01-01T00:00
+      val:
+        start: 2000-01-01T00:00
+        end: 2100-01-01T00:00
+      test:
+        start: 2000-01-01T00:00
+        end: 2100-01-01T00:00
+  domain_cropping:
+    margin_width_degrees: 7.19
+    interior_dataset_config_path: danra_model1_config.yaml
+    include_interior_points: false
+
+inputs:
+  ifs_sl:
+    path: ifs.zarr
+    dims: [time, prediction_timedelta, longitude, latitude]
+    variables:
+      - mean_sea_level_pressure
+      - 2m_temperature
+      - 10m_u_component_of_wind
+      - 10m_v_component_of_wind
+      - surface_pressure
+    derived_variables:
+      # derive variables to be used as forcings, evaluated at the valid time
+      # (analysis time + lead time)
+      toa_radiation:
+        kwargs:
+          time: ds_input.time
+          lead_time: ds_input.prediction_timedelta
+          lat: ds_input.latitude
+          lon: ds_input.longitude
+        function: mllam_data_prep.ops.derive_variable.physical_field.calculate_toa_radiation
+      hour_of_day_sin:
+        kwargs:
+          time: ds_input.time
+          lead_time: ds_input.prediction_timedelta
+          component: sin
+        function: mllam_data_prep.ops.derive_variable.time_components.calculate_hour_of_day
+      hour_of_day_cos:
+        kwargs:
+          time: ds_input.time
+          lead_time: ds_input.prediction_timedelta
+          component: cos
+        function: mllam_data_prep.ops.derive_variable.time_components.calculate_hour_of_day
+      day_of_year_sin:
+        kwargs:
+          time: ds_input.time
+          lead_time: ds_input.prediction_timedelta
+          component: sin
+        function: mllam_data_prep.ops.derive_variable.time_components.calculate_day_of_year
+      day_of_year_cos:
+        kwargs:
+          time: ds_input.time
+          lead_time: ds_input.prediction_timedelta
+          component: cos
+        function: mllam_data_prep.ops.derive_variable.time_components.calculate_day_of_year
+    dim_mapping:
+      analysis_time:
+        method: rename
+        dim: time
+      elapsed_forecast_duration:
+        method: rename
+        dim: prediction_timedelta
+      forcing_feature:
+        method: stack_variables_by_var_name
+        name_format: "{var_name}"
+      grid_index:
+        method: stack
+        dims: [longitude, latitude]
+    target_output_variable: forcing
+
+  ifs_pl:
+    path: ifs.zarr
+    dims: [time, prediction_timedelta, longitude, latitude, level]
+    variables:
+      geopotential:
+        level:
+          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
+          units: hPa
+      temperature:
+        level:
+          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
+          units: hPa
+      specific_humidity:
+        level:
+          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
+          units: hPa
+      u_component_of_wind:
+        level:
+          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
+          units: hPa
+      v_component_of_wind:
+        level:
+          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
+          units: hPa
+      vertical_velocity:
+        level:
+          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
+          units: hPa
+    dim_mapping:
+      analysis_time:
+        method: rename
+        dim: time
+      elapsed_forecast_duration:
+        method: rename
+        dim: prediction_timedelta
+      forcing_feature:
+        method: stack_variables_by_var_name
+        dims: [level]
+        name_format: "{var_name}{level}"
+      grid_index:
+        method: stack
+        dims: [longitude, latitude]
+    target_output_variable: forcing
+
+  ifs_static:
+    path: ifs.zarr
+    dims: [longitude, latitude]
+    variables:
+      - land_sea_mask
+      - geopotential_at_surface
+    dim_mapping:
+      static_feature:
+        method: stack_variables_by_var_name
+        name_format: "{var_name}"
+      grid_index:
+        method: stack
+        dims: [longitude, latitude]
+    target_output_variable: static
+
+  # Alternative: take the statics from ERA5 as in the neural-lam-dev reference
+  # config (identical to the training statics)
+  # era5_static:
+  #   path: gs://weatherbench2/datasets/era5/1959-2022-6h-1440x721.zarr
+  #   dims: [time, longitude, latitude, level]
+  #   variables:
+  #     - land_sea_mask
+  #     - geopotential_at_surface
+  #   dim_mapping:
+  #     static_feature:
+  #       method: stack_variables_by_var_name
+  #       name_format: "{var_name}"
+  #     grid_index:
+  #       method: stack
+  #       dims: [longitude, latitude]
+  #   target_output_variable: static
+
+extra:
+  projection:
+    class_name: PlateCarree
+    kwargs:
+      central_longitude: 0.0

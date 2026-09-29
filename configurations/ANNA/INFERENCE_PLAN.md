@@ -55,7 +55,17 @@ It has **no boundary datastore config or stats**, because `_find_datastore_paths
 
 ## Steps
 
-### 1. Boundary datastore configs (do this first)
+### 1. Boundary datastore configs (do this first) — DONE
+Status: implemented in `configurations/ANNA/configs/` and checked by `configurations/ANNA/tests/test_boundary_configs.py` (14 tests). The ERA5 boundary feature order was also checked against the order stored in the gefion-1 checkpoint, and it matches exactly (58 forcing + 2 static). Changes from the original plan are described below.
+
+Learned while implementing (mllam-data-prep `sadamov/building-ml-lams`):
+- `coord_ranges` can't have start == end, so the IFS/DINI configs have no `coord_ranges` (one cycle per store) and wide splits (2000–2100). They're used as-is at run time, with only input `path`s set.
+- Input `dims` is a superset check: each variable's dims must be a subset of the list, so 2D statics are fine.
+- If the `level` coordinate has a `units` attr, it must be exactly `"hPa"`.
+- Cropping works on the unit sphere, so the longitude convention doesn't matter, but the coords must be named `latitude`/`longitude`. `interior_dataset_config_path` is resolved relative to the CWD, and cropping builds the full interior dataset.
+- neural-lam resolves datastore paths relative to the neural-lam config file. `overload_stats_path` is a datastore *config*: neural-lam opens `<name>.zarr` next to it, or *creates the full dataset* if that zarr is missing (see step 3).
+
+Original step description:
 These configs define exactly which fields, levels, grid and dims each boundary source must provide. They're the spec to extend the GRIB→zarr conversion tool against for IFS GRIB files. Put them in `configurations/ANNA/configs/`:
 - **`era_7deg_model1_config.yaml`** is the training boundary config, recovered from the checkpoint and matching `neural-lam-dev@research:scripts/danra_era5_config.yaml`. Keep the training time range and splits: it's the reference that defines the feature order and the ERA5 train stats (`overload_stats_path` target), and step 3 uses it to reproduce the stats. Paths get rewritten to `era5.zarr` + `danra_model1_config.yaml`.
 - **`ifs_7deg_model1_config.yaml`** is the operational IFS boundary, adapted from `danra_ifs_config.yaml`:
@@ -65,7 +75,7 @@ These configs define exactly which fields, levels, grid and dims each boundary s
   - statics (`land_sea_mask`, `geopotential_at_surface`) from IFS itself rather than ERA5, so the operational setup has one source. Keep the ERA5 `era_static` input as a commented alternative.
   - Placeholder `path: ifs.zarr`; `create_inference_dataset.py` overrides it at run time.
   - A header comment listing, per field, the IFS shortName/paramId, units and the zarr variable/dim names the converter must write. This is the contract for the converter.
-- **`dini_7deg_model1_config.yaml`** is the DINI boundary. It uses the same ERA5-named variables, read from the `boundary.zarr` that `regrid_dini.py` writes (step 4), so it's structurally the ERA5 config with a different path and no `domain_cropping`, since that zarr is pre-cropped.
+- **`dini_7deg_model1_config.yaml`** is the DINI boundary. As implemented, `regrid_dini.py` (step 4) writes `boundary.zarr` in **exactly the IFS contract layout** (regular 0.25° lat/lon box, `time` × `prediction_timedelta`, ERA5 names). This config is therefore the IFS config with a different path and input names, and it uses the same `domain_cropping`, so there's one boundary format to get right.
 - **neural-lam configs** `7deg_config_{era5,ifs,dini}.yaml`: `datastore` = `danra_model1_config.yaml`, `datastore_boundary` = the matching boundary config, and for `ifs`/`dini`, `overload_stats_path: era_7deg_model1_config.yaml`.
 - **Validation:** load each config with the pinned mdp (step 2). For the IFS config, also build a tiny synthetic `ifs.zarr` with the expected variable/dim names, run `mdp.create_dataset`, and check it gives 58 forcing + 2 static features, in the same order as the ERA5 config (feature order must match the checkpoint).
 
@@ -78,6 +88,7 @@ These configs define exactly which fields, levels, grid and dims each boundary s
 - Assemble a local artifact directory `configurations/ANNA/inference_artifact/` (gitignored) from `gefion-1.zip` plus:
   - the step 1 configs (`configs/era_7deg_model1_config.yaml`, `ifs_…`, `dini_…`, and the neural-lam config variants)
   - `stats/era_7deg_model1_config.stats.zarr` and `grids/era_7deg_model1_config.grid.zarr` (boundary lat/lon)
+- **ERA5 stats datastore zarr.** `overload_stats_path` makes neural-lam open `era_7deg_model1_config.zarr` next to the configs. It must contain at least `splits` (train/val/test), the `forcing_feature`/`static_feature` coordinates, and `{forcing,static}__train__{mean,std}` plus `forcing__train__diff_{mean,std}`. The zarr must be newer than the config, or neural-lam logs a warning. If it's missing, neural-lam tries to build the full 2000–2020 ERA5 dataset.
 - **Boundary stats + lat/lon.** Preferred: export them on Gefion from `era_danra_model1_subset.zarr` and copy them in. Fallback `src/mlwm/recompute_boundary_stats.py`:
   - Run mdp on WB2 ERA5 with the recovered config over the train split (2000-01-01..2018-10-29, 6-hourly).
   - Assert 18014 grid points.
@@ -86,7 +97,7 @@ These configs define exactly which fields, levels, grid and dims each boundary s
 
 ### 4. `src/regrid_dini.py` (new, runs before `create_inference_dataset.py`)
 - **Interior:** DINI → DANRA grid (bilinear via lat/lon, DANRA grid cached in the image), every 3 h, DANRA names, `pressure` units set to hPa, and `r` converted from % to a fraction. `tw` passes through unchanged (verified to be the same quantity). For the other variables, compare DINI magnitudes against the train stats rather than trusting the unit labels. Writes `interior.zarr`.
-- **Boundary:** DINI → the 18014 ERA5 points, every 6 h, with ERA5 names:
+- **Boundary:** DINI → a regular 0.25° lat/lon box (lat 40.25–71.75, lon −19.5–32.0), every 6 h, following the IFS contract in `configs/ifs_7deg_model1_config.yaml`. `domain_cropping` in `dini_7deg_model1_config.yaml` then selects the boundary points. ERA5 names:
   - `pres_seasurface`→`mean_sea_level_pressure`, `t2m`→`2m_temperature`, `u10m/v10m`→`10m_{u,v}_component_of_wind`, `pres0m`→`surface_pressure`
   - `z t u v`→`geopotential temperature {u,v}_component_of_wind`, with `pressure`→`level`
   - `specific_humidity` derived from `r/100, t, p`
@@ -99,8 +110,8 @@ These configs define exactly which fields, levels, grid and dims each boundary s
 ### 5. `src/create_inference_dataset.py`
 - `FP_TRAINING_CONFIG` → `inference_artifact/configs/7deg_config.yaml` (the current `config.yaml` doesn't exist).
 - Also rewrite `datastore_boundary.config_path`, not just `datastore`/`datastores`.
-- Keep per-datastore time steps in `coord_ranges` (PT3H interior, PT6H boundary), plus one extra boundary step for `num_future_boundary_steps=1`.
-- Disable `domain_cropping` for pre-cropped boundary input.
+- The interior keeps its PT3H `coord_ranges`. The boundary configs (IFS/DINI) are used as-is with only the input paths set. Make sure the boundary store's lead times extend one boundary step past the forecast (`num_future_boundary_steps=1`).
+- For cropping, set `domain_cropping.interior_dataset_config_path` to the inference interior config (relative to CWD), so cropping uses the small inference interior dataset, not full DANRA.
 - Remove the unused `drop_time_inputs`.
 
 ### 6. `entry.sh`: add graph, eval and back-transform
