@@ -61,18 +61,24 @@ def _contains_unloadable(obj, _seen=None):
     return False
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("checkpoint_in")
-    parser.add_argument("checkpoint_out")
-    args = parser.parse_args()
-
-    ckpt = torch.load(
-        args.checkpoint_in,
+def load_checkpoint(fp_checkpoint):
+    """
+    Load a checkpoint, replacing classes that can't be imported with stubs.
+    """
+    return torch.load(
+        fp_checkpoint,
         map_location="cpu",
         weights_only=False,
         pickle_module=_pickle_module,
     )
+
+
+def sanitize_checkpoint(ckpt):
+    """
+    Drop the hyper-parameters that can't (or shouldn't) be unpickled at
+    inference time from a loaded checkpoint (in place), and check that nothing
+    that couldn't be unpickled is left.
+    """
     hparams = ckpt["hyper_parameters"]
     for key in KEYS_TO_DROP:
         if key in hparams:
@@ -85,10 +91,20 @@ def main():
                 f"hyper_parameters[{key!r}] still contains objects that could "
                 "not be unpickled, refusing to write a checkpoint with stubs"
             )
+    return ckpt
 
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("checkpoint_in")
+    parser.add_argument("checkpoint_out")
+    args = parser.parse_args()
+
+    ckpt = sanitize_checkpoint(load_checkpoint(args.checkpoint_in))
     torch.save(ckpt, args.checkpoint_out)
     print(
-        f"Wrote {args.checkpoint_out} (kept hyper_parameters: {list(hparams)})"
+        f"Wrote {args.checkpoint_out} "
+        f"(kept hyper_parameters: {list(ckpt['hyper_parameters'])})"
     )
 
 

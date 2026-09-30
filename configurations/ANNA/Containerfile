@@ -8,7 +8,14 @@ COPY *.yaml ./
 COPY entry.sh ./
 COPY src/ ./src
 
-# Download inference artifact from S3
+# Where the inference artifact comes from:
+# - "local": the artifact directory `inference_artifact/` in the build context,
+#   assembled with `dev-utils/assemble_artifact.py` (gefion-1 completed with
+#   the boundary datastore configs and statistics, see INFERENCE_PLAN.md)
+# - "s3": download ${DEFAULT_ARTIFACT} from S3 (needs AWS credentials as build
+#   args). NB: gefion-1.zip on S3 lacks the boundary datastore, so this only
+#   works once a completed artifact has been uploaded
+ARG ARTIFACT_SOURCE="local"
 ARG DEFAULT_ARTIFACT="s3://mlwm-artifacts/inference-artifacts/gefion-1.zip"
 ENV MLWM_INFERENCE_ARTIFACT=${DEFAULT_ARTIFACT}
 
@@ -22,11 +29,20 @@ ENV AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
 ENV AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
 ENV AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
 
-# Get inference artifact from S3
-RUN aws s3 cp $MLWM_INFERENCE_ARTIFACT ./inference_artifact.zip
-RUN mkdir -p /workspace/inference_artifact
-RUN unzip inference_artifact.zip -d /workspace/inference_artifact
-RUN rm inference_artifact.zip
+# `inference_artifact/` must exist in the build context (build_image.sh
+# creates an empty one when ARTIFACT_SOURCE=s3)
+COPY inference_artifact/ /workspace/inference_artifact_local/
+RUN if [ "$ARTIFACT_SOURCE" = "local" ] ; then \
+        mv /workspace/inference_artifact_local /workspace/inference_artifact ; \
+    elif [ "$ARTIFACT_SOURCE" = "s3" ] ; then \
+        rm -rf /workspace/inference_artifact_local && \
+        aws s3 cp $MLWM_INFERENCE_ARTIFACT ./inference_artifact.zip && \
+        mkdir -p /workspace/inference_artifact && \
+        unzip inference_artifact.zip -d /workspace/inference_artifact && \
+        rm inference_artifact.zip ; \
+    else \
+        echo "unknown ARTIFACT_SOURCE=$ARTIFACT_SOURCE (local or s3)" && exit 1 ; \
+    fi
 # List files in the inference artifact directory for verification
 RUN ls -la /workspace/inference_artifact
 

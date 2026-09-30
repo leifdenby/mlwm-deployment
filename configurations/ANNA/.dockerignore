@@ -1,0 +1,10 @@
+# Keep the build context small (also used by podman). The image only needs
+# pyproject.toml, *.yaml, entry.sh, src/ and inference_artifact/
+.venv/
+inference_workdir/
+tmp/
+tests/
+dev-utils/
+.devcontainer/
+**/__pycache__/
+**/.DS_Store

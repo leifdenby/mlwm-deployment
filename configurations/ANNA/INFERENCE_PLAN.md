@@ -105,7 +105,23 @@ Original step description:
 - `neural-lam` → `joeloskarsson/neural-lam-dev@research`, pinned to a sha that includes `e7d11c9`.
 - `mllam-data-prep` → a branch with both `domain_cropping` (sadamov `building-ml-lams`) and the inference CLI args (leifdenby `feat/inference-cli-args`). Check whether they can be merged, or whether one branch already has both. **This is the riskiest dependency step.** Step 1's configs can be written in parallel, but their validation needs this step.
 
-### 3. Complete the artifact locally (no upload for now)
+### 3. Complete the artifact locally (no upload for now) — DONE (with placeholder boundary stats)
+Status:
+- `src/mlwm/build_inference_artifact.py` now packages `datastore_boundary`, including its stats. It also rewrites **every** datastore `config_path` to the packaged file; the single `datastore` case previously kept absolute `/dcai` paths. Covered by `src/mlwm/tests/test_build_inference_artifact.py`.
+- `dev-utils/assemble_artifact.py --gefion-1-zip … --boundary-stats …` builds `configurations/ANNA/inference_artifact/` (gitignored):
+  - `checkpoint.pkl`, sanitised
+  - `configs/`: the repo configs, plus the originals under `configs/gefion-1/`
+  - `configs/era_7deg_model1_config.zarr`, the stats datastore
+  - `stats/{danra,era_7deg}_model1_config.stats.zarr`
+  - `grids/era_7deg_model1_config.grid.zarr`, the 18014 boundary points recovered from the checkpoint. They're identical to the recovery done with Kasper's actual subset file.
+  - `artifact.yaml` with provenance, including whether the boundary stats are a placeholder.
+
+  It checks that neural-lam loads the stats datastore. `check_checkpoint_compat.py --run-eval` passes with the artifact's checkpoint and configs.
+- Assembled for now with **placeholder boundary stats**: weather fields from 3 days of ERA5 (2010-01-01..03), derived features over the full training split, statics exact. Re-run the assembly with the exact stats from the server run (`compute_era5_boundary_stats.py`) when they're available.
+- For the boundary, **neural-lam only uses `{forcing,static}__train__{mean,std}`** (`MDPDatastore.get_standardization_dataarray`); `diff_*` is only used for the interior `state`. So the ERA5 `diff_*` stats (and their second-difference quirk) don't affect inference.
+- `Containerfile`: `ARG ARTIFACT_SOURCE=local` (default) copies `inference_artifact/`, and `s3` keeps the old download. `build_image.sh` only requires AWS credentials for `s3`, and warns if the local artifact uses placeholder stats. `.dockerignore` keeps `.venv` etc. out of the build context. **Not built yet**; that's the step 6 verification.
+
+Original step description:
 - Fix `_find_datastore_paths` so it includes `datastore_boundary`, and add a test in `src/mlwm/tests/`. That way a future re-build on Gefion is complete.
 - Assemble a local artifact directory `configurations/ANNA/inference_artifact/` (gitignored) from `gefion-1.zip` plus:
   - the step 1 configs (`configs/era_7deg_model1_config.yaml`, `ifs_…`, `dini_…`, and the neural-lam config variants)

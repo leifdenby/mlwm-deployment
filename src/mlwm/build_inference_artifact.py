@@ -14,7 +14,7 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
 
 import dotenv
 import mllam_data_prep as mdp
@@ -41,13 +41,13 @@ ARTIFACT_META_FILENAME = "artifact.yaml"
 CHECKPOINT_FILENAME = "checkpoint.pkl"
 
 
-def _find_datastore_paths(nl_config_path: str) -> Dict[str, str]:
+def _find_datastore_paths(nl_config_path: str) -> Dict[Tuple[str, ...], str]:
     """
-    Find the paths to the datastore configuration files in the neural-lam. This
-    function returns a dictionary because the research branch of neural-lam
-    uses more than one datastore (one for the domain interior and one for the
-    boundary). By supporting the new config structure we can also support
-    multiple datastores in the future.
+    Find the paths to the datastore configuration files in the neural-lam
+    config. The research branch of neural-lam uses more than one datastore:
+    `datastore` for the domain interior and `datastore_boundary` for the
+    boundary. The `datastores` mapping (multiple named datastores) is also
+    supported.
 
     Parameters
     ----------
@@ -57,10 +57,11 @@ def _find_datastore_paths(nl_config_path: str) -> Dict[str, str]:
 
     Returns
     -------
-    datastore_paths : Dict[str, str]
-        A dictionary with the name of the datastore as the key and the path
-        to the datastore configuration file as the value. If there is only
-        one datastore, the key is None.
+    datastore_paths : Dict[Tuple[str, ...], str]
+        A dictionary with the keys to the datastore entry in the neural-lam
+        config as the key, e.g. `("datastore",)`, `("datastore_boundary",)` or
+        `("datastores", name)`, and the path to the datastore configuration
+        file as the value.
     """
     with open(nl_config_path, "r") as f:
         nl_config = yaml.safe_load(f)
@@ -76,16 +77,17 @@ def _find_datastore_paths(nl_config_path: str) -> Dict[str, str]:
         return Path(nl_config_path).parent / datastore_path
 
     datastore_paths = {}
-    if "datastore" in nl_config:
-        datastore_paths[None] = _make_abspath(
-            nl_config["datastore"]["config_path"]
-        )
-    elif "datastores" in nl_config:
-        for name, datastore_config in nl_config["datastores"].items():
-            datastore_paths[name] = _make_abspath(
-                datastore_config["config_path"]
+    for key in ["datastore", "datastore_boundary"]:
+        if nl_config.get(key) is not None:
+            datastore_paths[(key,)] = _make_abspath(
+                nl_config[key]["config_path"]
             )
-    else:
+    for name, datastore_config in (nl_config.get("datastores") or {}).items():
+        datastore_paths[("datastores", name)] = _make_abspath(
+            datastore_config["config_path"]
+        )
+
+    if len(datastore_paths) == 0:
         raise ValueError(
             "No datastore found in the config file. Are you sure you "
             "have provided the path to a valid neural-lam config file?"
@@ -172,8 +174,9 @@ def _copy_yaml_configs(nl_config_path: str, artifact_output_path: str):
     points to. The config files are copied to a subdirectory called "configs"
     in the artifact output directory.
 
-    NB: The `config_path` field of the datastore(s) in the neural-lam config
-    file is/are modified to be relative to the neural-lam config file.
+    NB: The `config_path` field of the datastore(s) (including the boundary
+    datastore) in the neural-lam config file is/are modified to be relative to
+    the neural-lam config file.
     This is done to make it easier to package the config files together with
     the artifact.
 
@@ -195,7 +198,7 @@ def _copy_yaml_configs(nl_config_path: str, artifact_output_path: str):
     datastore_config_paths = _find_datastore_paths(nl_config_path)
 
     for (
-        datastore_name,
+        datastore_keys,
         datastore_config_path,
     ) in datastore_config_paths.items():
         fn_datastore_config = Path(datastore_config_path).name
@@ -207,12 +210,12 @@ def _copy_yaml_configs(nl_config_path: str, artifact_output_path: str):
             f"Copied {datastore_config_path} -> {fp_datastore_config_dst}"
         )
 
-        if datastore_name is not None:
-            # update the config path in the neural-lam config file to just have
-            # the name of the file
-            nl_config["datastores"][datastore_name][
-                "config_path"
-            ] = fn_datastore_config
+        # update the config path in the neural-lam config file to just have
+        # the name of the file
+        datastore_entry = nl_config
+        for key in datastore_keys:
+            datastore_entry = datastore_entry[key]
+        datastore_entry["config_path"] = fn_datastore_config
 
     fn_config = Path(nl_config_path).name
     fp_config_dst = artifact_output_path / fn_config
