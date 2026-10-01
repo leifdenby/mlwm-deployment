@@ -27,14 +27,18 @@
 #   prediction_timedelta  timedelta64, lead time. From 0h to at least the ANNA
 #                         forecast length + 6h, every 6h (3h also fine)
 #   latitude, longitude   1D, regular 0.25 deg grid on the ERA5 grid points
-#                         (multiples of 0.25 deg) covering at least
-#                         lat 40.0..72.0, lon -27.0..40.0. The 18014 boundary
-#                         points ANNA was trained with span lat 40.50..71.50,
-#                         lon -26.25..39.50 (recovered from the checkpoint);
-#                         this box adds a 0.5 deg safety margin. NB: the 7.19
-#                         deg cropping margin is a great-circle distance, so
-#                         the ring is much wider in longitude than in
-#                         latitude. Longitude convention (0..360 or
+#                         (multiples of 0.25 deg): lat 40.0..72.0 and
+#                         lon -27.0..39.5. The 18014 boundary points ANNA was
+#                         trained with span lat 40.50..71.50,
+#                         lon -26.25..39.50 (recovered from the checkpoint).
+#                         The EAST EDGE MUST BE EXACTLY 39.5E (the edge of the
+#                         ERA5 subset used in training): the 7.19 deg cropping
+#                         margin reaches further east, so a wider box adds 49
+#                         boundary points ANNA wasn't trained with. The other
+#                         edges have a 0.5 deg margin. NB: the cropping margin
+#                         is a great-circle distance, so the ring is much
+#                         wider in longitude than in latitude. Longitude
+#                         convention (0..360 or
 #                         -180..180) does not matter. Coordinate names must be
 #                         exactly `latitude` and `longitude`.
 #   level                 pressure level in hPa, must include

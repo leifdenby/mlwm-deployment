@@ -24,6 +24,10 @@ contains:
     grids/era_7deg_model1_config.grid.zarr
                             lat/lon of the 18014 boundary points ANNA was
                             trained with, recovered from the checkpoint
+    grids/danra_model1_config.grid.zarr
+                            DANRA grid (x, y, lat, lon) and statics (lsm,
+                            orography) from the public DANRA v0.5.0 store, the
+                            target grid for regridding DINI (src/regrid_dini.py)
     training_cli_args.yaml  from gefion-1
     gefion-1.artifact.yaml  artifact.yaml of gefion-1
     artifact.yaml           provenance of this assembled artifact
@@ -61,9 +65,9 @@ N_BOUNDARY_POINTS = 18014
 CHECKPOINT_FILENAME = "checkpoint.pkl"
 
 
-def _import_dev_util(name):
+def _import_dev_util(name, directory=DEV_UTILS_DIR):
     spec = importlib.util.spec_from_file_location(
-        name, DEV_UTILS_DIR / f"{name}.py"
+        name, directory / f"{name}.py"
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -227,6 +231,13 @@ def main():
             ckpt, stats_script.SUBSET_LATS, stats_script.SUBSET_LONS
         )
         ds_grid.to_zarr(out / "grids" / f"{BOUNDARY_DATASTORE_NAME}.grid.zarr")
+        logger.info("caching DANRA grid and statics")
+        regrid_dini = _import_dev_util(
+            "regrid_dini", directory=ANNA_DIR / "src"
+        )
+        regrid_dini.create_danra_grid(
+            out / "grids" / f"{INTERIOR_DATASTORE_NAME}.grid.zarr"
+        )
         torch.save(
             sanitize.sanitize_checkpoint(ckpt), out / CHECKPOINT_FILENAME
         )

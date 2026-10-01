@@ -145,8 +145,32 @@ Original step description:
 - `Containerfile`: add `ARG ARTIFACT_SOURCE=local`. When `local`, `COPY inference_artifact/` into the image instead of the S3 download. Keep the S3 path for later, when the completed artifact is uploaded (e.g. as `gefion-2.zip`).
 
 ### 4. `src/regrid_dini.py` (new, runs before `create_inference_dataset.py`)
+Implemented as `src/regrid_dini.py`, with two commands:
+- `create-danra-grid` caches DANRA's grid and statics. `assemble_artifact.py` now writes them to `grids/danra_model1_config.grid.zarr`; the cached statics equal the DANRA static training stats exactly.
+- `regrid --dini-root … --danra-grid … --forecast-duration … --output …` writes `interior_{single,pressure}_levels.zarr` and `boundary.zarr`.
+
+Unit tests are in `tests/test_regrid_dini.py`.
+
+Findings from the data that shaped it (don't trust the metadata labels):
+- **Winds.** DINI *and* DANRA u/v are **grid-relative**. DINI is labelled `eastward_wind`/`northward_wind`, and every variable in both carries `uvRelativeToGrid: 1`, so neither label helps. Checked with geostrophic balance at 500 hPa: DINI stored wind vs grid-relative geostrophic median −1.2°, no dependence on the grid rotation; DANRA −6° vs −27° if treated as earth-relative. The two Lambert grids are rotated differently (DINI centred on 8°W, DANRA on 25°E), so winds are rotated DINI grid → earth on the DINI grid, interpolated, then earth → DANRA grid (interior) or kept earth-relative (boundary, as ERA5/IFS).
+- **`orography`.** DINI is surface altitude (m); DANRA is surface **geopotential** (m²/s², train mean 1105). The interior statics come from DANRA itself; the boundary `geopotential_at_surface` = DINI orography × g.
+- **`lwavr0m`** is **net** longwave in both (DINI mean −52, DANRA train mean −58 W/m²), even though DINI's label says downwelling. `swavr0m` is the same HARMONIE parameter (`swavr`) in both.
+- **`r`** is % in DINI and a fraction in DANRA.
+- **Boundary derived fields:** `q` uses the IFS/ERA5 mixed-phase saturation vapour pressure. `ω = −ρ g w` is hydrostatic, with virtual temperature.
+- **DINI chunks** are one time × one level × the full field, so each field read is about 24 MB (float64).
+- **25% of the training boundary points (4,573 of 18,014) are outside DINI.** Only 733 are north of 69.9°N; 2,180 are east of 30°E, reaching south to 40.5°N, because DINI's Lambert grid (centred on 8°W) tilts westward at its eastern edge. With `--outside-domain nearest` (the default) they take the value of the nearest DINI edge point, and the count is recorded in the output attrs; `error` refuses instead. This makes the DINI-only boundary a rough approximation over a quarter of the ring, so **IFS (step 9), or DINI blended with IFS outside the DINI domain, is the better boundary source**.
+- **Boundary box east edge = 39.5°E exactly.** With 40.0°E, cropping gave 18,063 points (49 not used in training). Fixed in the regridder and in the IFS contract.
+- **Smoothing before sampling the boundary** (`--boundary-smoothing-km`, default 25 km = 13 × 13 DINI cells). Point samples of 2 km DINI kept small-scale vertical velocity: normalised std 3–4.6 at 850–1000 hPa, against 0.25° ERA5 stats. With smoothing these are in range.
+
+Verified on DINI 2026-09-26T18Z (`--forecast-duration PT3H`):
+- winds vs geostrophic at 700 hPa: interior (DANRA grid-relative) median −2.0°, boundary (earth-relative) −0.1°;
+- normalised with the training stats, all features have |mean| < 2 and std of roughly 1. The exceptions are night-time `swavr0m`, and q/upper-level T/z around +1.8, which is expected against the January placeholder stats;
+- the outputs load NaN-free through `danra_model1_config.yaml` (55 state features, 589 × 789 points) and `dini_7deg_model1_config.yaml` (58 forcing features, in the ERA5 stats order). The cropped boundary points are **identical to the 18,014 training points**;
+- regridding takes about 2 min per time step from a laptop; most of that is reading DINI from S3.
+
+Original step description:
 - **Interior:** DINI → DANRA grid (bilinear via lat/lon, DANRA grid cached in the image), every 3 h, DANRA names, `pressure` units set to hPa, and `r` converted from % to a fraction. `tw` passes through unchanged (verified to be the same quantity). For the other variables, compare DINI magnitudes against the train stats rather than trusting the unit labels. Writes `interior.zarr`.
-- **Boundary:** DINI → a regular 0.25° lat/lon box (lat 40.0–72.0, lon −27.0–40.0), every 6 h, following the IFS contract in `configs/ifs_7deg_model1_config.yaml`. `domain_cropping` in `dini_7deg_model1_config.yaml` then selects the boundary points. ERA5 names:
+- **Boundary:** DINI → a regular 0.25° lat/lon box (lat 40.0–72.0, lon −27.0–39.5), every 6 h, following the IFS contract in `configs/ifs_7deg_model1_config.yaml`. `domain_cropping` in `dini_7deg_model1_config.yaml` then selects the boundary points. ERA5 names:
   - `pres_seasurface`→`mean_sea_level_pressure`, `t2m`→`2m_temperature`, `u10m/v10m`→`10m_{u,v}_component_of_wind`, `pres0m`→`surface_pressure`
   - `z t u v`→`geopotential temperature {u,v}_component_of_wind`, with `pressure`→`level`
   - `specific_humidity` derived from `r/100, t, p`
@@ -210,7 +234,7 @@ Based on `neural-lam-dev@research:scripts/danra_ifs_config.yaml` and `danra_mode
 
 That's 5 + 6×8 = 53 raw forcing fields plus 2 statics. The remaining 5 features (`toa_radiation` and hour-of-day/day-of-year sin/cos) are computed by mdp.
 
-- **Grid:** regular 0.25° lat/lon, box **lat 40.0–72.0, lon −27.0–40.0**. The 18014 training boundary points span lat 40.50–71.50, lon −26.25–39.50; the box adds a 0.5° margin. The 7.19° cropping margin is a great-circle distance, so the ring is much wider in longitude than "DANRA extent ± 7.19°" (an earlier version of this plan had lon −19.5–32.0, which was too narrow).
+- **Grid:** regular 0.25° lat/lon, box **lat 40.0–72.0, lon −27.0–39.5**. The 18014 training boundary points span lat 40.50–71.50, lon −26.25–39.50. The **east edge must be exactly 39.5°E**, the edge of the training ERA5 subset: a wider box adds 49 boundary points ANNA wasn't trained with, because the cropping margin reaches further east. The other edges have a 0.5° margin. The 7.19° cropping margin is a great-circle distance, so the ring is much wider in longitude than "DANRA extent ± 7.19°" (an earlier version of this plan had lon −19.5–32.0, which was too narrow).
 - **Lead times:** 0 h to at least the ANNA forecast length + 6 h. The training boundary step is 6 h; 3-hourly is fine and gets subsampled.
 - **Cycles:** 00/12 UTC is enough (06/18 are fine too). At run time, pick the latest IFS cycle at or before the DINI analysis time and offset the lead times.
 - **Units:** as in ERA5 (z in m²/s², q in kg/kg, w in Pa/s), with mdp dim names `time, prediction_timedelta, longitude, latitude, level`.
