@@ -1,303 +1,170 @@
-# ANNA
+# ANNA (gefion-1)
 
-The ANNA artifact is "s3://mlwm-artifacts/inference-artifacts/gefion-1.zip", which contains a model trained on the DANRA dataset on Gefion.
+ANNA is a hierarchical graph-based limited-area model (neural-lam `hi_lam`,
+graph `7deg_rect_hi3`) trained on Gefion on DANRA (interior, 2.5 km, 3-hourly),
+with ERA5 boundary forcing on a 7.19° ring around the DANRA domain. Here it is
+run operationally from **DINI** (interior initial states) with **DINI or IFS**
+on the boundary.
 
-## Building image
-`AWS_ACCESS_KEY_ID=<access_key> AWS_SECRET_ACCESS_KEY=<secret_access_key> CONTAINER_APP=podman ./build_image.sh`
+The full history, the decisions and the reasons behind them are in
+[INFERENCE_PLAN.md](INFERENCE_PLAN.md).
 
-## Running inference
-`AWS_ACCESS_KEY_ID=<access_key> AWS_SECRET_ACCESS_KEY=<secret_access_key> ./run_inference_container.sh 2026-02-04T00:00:00Z`
+## Provenance
 
-You can get an interactive debugger to launch on exceptions with passing `MLWM_DEBUGGER=ipdb` as an environment variable. This will launch `ipdb` at the point of exception, allowing you to inspect variables and the stack trace.
+- Training run: wandb [`jo-research-team/neural_lam/n0o7jw5f`](https://wandb.ai/jo-research-team/neural_lam/runs/n0o7jw5f)
+  (`train-hi_lam-2x300-02_27_15-4034`, 80 epochs), checkpoint packaged as
+  `s3://mlwm-artifacts/inference-artifacts/gefion-1.zip`
+- Training code: [`joeloskarsson/neural-lam-dev`](https://github.com/joeloskarsson/neural-lam-dev)
+  commit `e58e334c` (`research` branch), with torch 2.6, mllam-data-prep 0.5.0
+  (sadamov fork), weather-model-graphs 0.2.0 and zarr 2.18
+- Model arguments relevant at inference: `--model hi_lam --graph_name
+  7deg_rect_hi3 --hidden_dim 300 --hidden_dim_grid 150 --time_delta_enc_dim 32
+  --processor_layers 2 --dynamic_time_deltas`, with 1 past and 1 future
+  forcing and boundary step (all set in `entry.sh`). The full training
+  arguments are in `inference_artifact/training_cli_args.yaml`
+- The paper's DANRA checkpoint ([Zenodo 15131838](https://zenodo.org/records/15131838))
+  may be a later fine-tune of this model; it hasn't been compared yet
 
+## Software
 
-## Training cli args
+Pinned in [pyproject.toml](pyproject.toml):
 
-```yaml
-- datastore:
-  - config_path: /dcai/projects/cu_0003/user_space/hinkas/git-repos/ablation-studies/configs/danra_model1/7deg_config.yaml
-- num_workers: 6
-- precision: bf16-mixed
-- batch_size: 1
-- hidden_dim: 300
-- hidden_dim_grid: 150
-- time_delta_enc_dim: 32
-- config_path: /dcai/projects/cu_0003/user_space/hinkas/git-repos/ablation-studies/configs/danra_model1/7deg_config.yaml
-- model: hi_lam
-- processor_layers: 2
-- graph_name: 7deg_rect_hi3
-- num_nodes: 2
-- epochs: 80
-- ar_steps_train: 1
-- lr: 0.001
-- min_lr: 0.001
-- val_interval: 5
-- ar_steps_eval: 4
-- val_steps_to_log: 1 2 4
+- **neural-lam**: `joeloskarsson/neural-lam-dev@a44d432e`. It contains the
+  training commit and forecast-format boundary forcing (needed for IFS); later
+  commits break installing from git
+- **mllam-data-prep**: `sadamov/mllam-data-prep@dd9af481`, exactly the version
+  used for training. mllam-data-prep ≥ 0.7 doesn't keep per-point lat/lon for
+  regular lat/lon grids, which neural-lam-dev needs for the boundary
+- **zarr 2**, as in training; neural-lam-dev writes its output with a zarr v2
+  compressor
+
+## Configs
+
+All in [configs/](configs/):
+
+| File | What |
+|---|---|
+| `danra_model1_config.yaml` | interior (DANRA) datastore, as in training |
+| `era_7deg_model1_config.yaml` | ERA5 boundary datastore ANNA was trained with; reference for the boundary features and their (ERA5) normalisation statistics |
+| `ifs_7deg_model1_config.yaml` | operational IFS boundary. **Its header is the contract for the IFS GRIB → zarr conversion** (variables, units, dims, lead times, and the 0.25° box lat 40.0–72.0, lon −27.0–39.5; the east edge must be exactly 39.5°E) |
+| `dini_7deg_model1_config.yaml` | DINI boundary, in the same layout as IFS |
+| `7deg_config_{era5,ifs,dini}.yaml` | neural-lam configs; IFS and DINI are normalised with the ERA5 training statistics (`overload_stats_path`) |
+
+## Inference artifact
+
+`gefion-1.zip` is incomplete (no boundary datastore or statistics), and its
+checkpoint can't be loaded as is. The complete artifact is assembled locally
+in `inference_artifact/` (gitignored):
+
+```bash
+aws s3 cp s3://mlwm-artifacts/inference-artifacts/gefion-1.zip .
+uv run --project configurations/ANNA \
+    python configurations/ANNA/dev-utils/assemble_artifact.py \
+    --gefion-1-zip gefion-1.zip \
+    --boundary-stats era_7deg_model1_config.stats.zarr
 ```
 
-## mllam-data-prep config
+This adds the sanitised checkpoint, the configs above, the ERA5 boundary
+statistics, the DANRA grid and statics, and the 18014 training boundary
+points. See the docstring of `dev-utils/assemble_artifact.py` for the layout.
 
-```yaml
-schema_version: v0.5.0
-dataset_version: v0.1.0
+The **ERA5 boundary statistics** were never exported from the training
+datastore. They are recomputed from WeatherBench2 ERA5 with
+`dev-utils/compute_era5_boundary_stats.py`, which reproduces the training
+computation exactly. It's restartable and has a progress bar, but needs about
+9 TB of reads. Until that has run, the artifact uses **placeholder**
+statistics (3 days of ERA5, with exact values for the derived and static
+features). Re-run `assemble_artifact.py` with the exact statistics when they
+are available.
 
-output:
-  variables:
-    static: [grid_index, static_feature]
-    state: [time, grid_index, state_feature]
-    forcing: [time, grid_index, forcing_feature]
-  coord_ranges:
-    time:
-      start: 2000-01-01T00:00
-      end: 2020-10-29T00:00
-      step: PT3H
-  chunking:
-    time: 1
-    state_feature: 20
-  splitting:
-    dim: time
-    splits:
-      train:
-        start: 2000-01-01T00:00
-        end: 2018-10-29T00:00
-        compute_statistics:
-          ops: [mean, std, diff_mean, diff_std]
-          dims: [grid_index, time]
-      val:
-        start: 2018-11-05T00:00
-        end: 2019-10-22T00:00
-      test:
-        start: 2019-10-29T00:00
-        end: 2020-10-29T00:00
+## Building the image
 
-inputs:
-  danra_sl_state:
-    path: /dcai/projects/cu_0003/data/sources/danra/v0.5.0/single_levels.zarr/
-    dims: [time, x, y]
-    variables:
-      - pres_seasurface
-      - t2m
-      - u10m
-      - v10m
-      - pres0m
-      - lwavr0m
-      - swavr0m
-    dim_mapping:
-      time:
-        method: rename
-        dim: time
-      grid_index:
-        method: stack
-        dims: [x, y]
-      state_feature:
-        method: stack_variables_by_var_name
-        name_format: "{var_name}"
-    target_output_variable: state
-
-  danra_pl_state:
-    path: /dcai/projects/cu_0003/data/sources/danra/v0.5.0/pressure_levels.zarr/
-    dims: [time, x, y, pressure]
-    variables:
-      z:
-        pressure:
-          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
-          units: hPa
-      t:
-        pressure:
-          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
-          units: hPa
-      r:
-        pressure:
-          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
-          units: hPa
-      u:
-        pressure:
-          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
-          units: hPa
-      v:
-        pressure:
-          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
-          units: hPa
-      tw:
-        pressure:
-          values: [100, 200, 400, 600, 700, 850, 925, 1000,]
-          units: hPa
-    dim_mapping:
-      time:
-        method: rename
-        dim: time
-      state_feature:
-        method: stack_variables_by_var_name
-        dims: [pressure]
-        name_format: "{var_name}{pressure}"
-      grid_index:
-        method: stack
-        dims: [x, y]
-    target_output_variable: state
-
-  danra_static:
-    path: /dcai/projects/cu_0003/data/sources/danra/v0.5.0/single_levels.zarr/
-    dims: [x, y]
-    variables:
-      - lsm
-      - orography
-    dim_mapping:
-      grid_index:
-        method: stack
-        dims: [x, y]
-      static_feature:
-        method: stack_variables_by_var_name
-        name_format: "{var_name}"
-    target_output_variable: static
-
-  danra_forcing:
-    path: /dcai/projects/cu_0003/data/sources/danra/v0.5.0/single_levels.zarr/
-    dims: [time, x, y]
-    derived_variables:
-      # derive variables to be used as forcings
-      toa_radiation:
-        kwargs:
-          time: ds_input.time
-          lat: ds_input.lat
-          lon: ds_input.lon
-        function: mllam_data_prep.ops.derive_variable.physical_field.calculate_toa_radiation
-      hour_of_day_sin:
-        kwargs:
-          time: ds_input.time
-          component: sin
-        function: mllam_data_prep.ops.derive_variable.time_components.calculate_hour_of_day
-      hour_of_day_cos:
-        kwargs:
-          time: ds_input.time
-          component: cos
-        function: mllam_data_prep.ops.derive_variable.time_components.calculate_hour_of_day
-      day_of_year_sin:
-        kwargs:
-          time: ds_input.time
-          component: sin
-        function: mllam_data_prep.ops.derive_variable.time_components.calculate_day_of_year
-      day_of_year_cos:
-        kwargs:
-          time: ds_input.time
-          component: cos
-        function: mllam_data_prep.ops.derive_variable.time_components.calculate_day_of_year
-    dim_mapping:
-      time:
-        method: rename
-        dim: time
-      grid_index:
-        method: stack
-        dims: [x, y]
-      forcing_feature:
-        method: stack_variables_by_var_name
-        name_format: "{var_name}"
-    target_output_variable: forcing
-
-extra:
-  projection:
-    class_name: LambertConformal
-    kwargs:
-      central_longitude: 25.0
-      central_latitude: 56.7
-      standard_parallels: [56.7, 56.7]
-      globe:
-        semimajor_axis: 6367470.0
-        semiminor_axis: 6367470.0
+```bash
+CONTAINER_APP=podman ./build_image.sh
 ```
 
-## Neural-lam config
+By default (`ARTIFACT_SOURCE=local`) the image includes the assembled
+`inference_artifact/`, and no AWS credentials are needed. `ARTIFACT_SOURCE=s3`
+downloads the artifact from S3 instead (needs `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`),
+but that only makes sense once a complete artifact has been uploaded. Set
+`MLWM_PULL_PROXY` to pull the base image through DMI's proxy.
 
-```yaml
-datastore:
-  config_path: /dcai/projects/cu_0003/user_space/hinkas/git-repos/ablation-studies/configs/danra_model1/danra_model1_config.yaml
-  kind: mdp
-datastore_boundary:
-  config_path: /dcai/projects/cu_0003/user_space/hinkas/git-repos/ablation-studies/configs/era_forcing/era_7deg_model1_config.yaml
-  kind: mdp
-training:
-  excluded_intervals:
-  - - 2002-11-19T00
-    - 2002-11-19T06
-  - - 2007-08-26T00
-    - 2007-08-26T21
-  - - 2017-11-25T15
-    - 2017-11-25T15
-  output_clamping:
-    lower:
-      r100: 0
-      r1000: 0
-      r200: 0
-      r400: 0
-      r600: 0
-      r700: 0
-      r850: 0
-      r925: 0
-    upper:
-      r100: 1
-      r1000: 1
-      r200: 1
-      r400: 1
-      r600: 1
-      r700: 1
-      r850: 1
-      r925: 1
-  state_feature_weighting:
-    __config_class__: ManualStateFeatureWeighting
-    weights:
-      lwavr0m: 1.0
-      pres0m: 1.0
-      pres_seasurface: 1.0
-      r100: 0.125
-      r1000: 0.125
-      r200: 0.125
-      r400: 0.125
-      r600: 0.125
-      r700: 0.125
-      r850: 0.125
-      r925: 0.125
-      swavr0m: 1.0
-      t100: 0.125
-      t1000: 0.125
-      t200: 0.125
-      t2m: 1.0
-      t400: 0.125
-      t600: 0.125
-      t700: 0.125
-      t850: 0.125
-      t925: 0.125
-      tw100: 0.125
-      tw1000: 0.125
-      tw200: 0.125
-      tw400: 0.125
-      tw600: 0.125
-      tw700: 0.125
-      tw850: 0.125
-      tw925: 0.125
-      u100: 0.125
-      u1000: 0.125
-      u10m: 1.0
-      u200: 0.125
-      u400: 0.125
-      u600: 0.125
-      u700: 0.125
-      u850: 0.125
-      u925: 0.125
-      v100: 0.125
-      v1000: 0.125
-      v10m: 1.0
-      v200: 0.125
-      v400: 0.125
-      v600: 0.125
-      v700: 0.125
-      v850: 0.125
-      v925: 0.125
-      z100: 0.125
-      z1000: 0.125
-      z200: 0.125
-      z400: 0.125
-      z600: 0.125
-      z700: 0.125
-      z850: 0.125
-      z925: 0.125
+## Running a forecast
+
+[entry.sh](entry.sh) runs the whole pipeline:
+
+1. `src/regrid_dini.py`: DINI → DANRA grid (interior) and, for the DINI
+   boundary, → the 0.25° ERA5 boundary box
+2. `src/create_inference_dataset.py`: inference datastores and neural-lam
+   config
+3. `neural_lam.build_rectangular_graph`: the `7deg_rect_hi3` graph
+4. `neural_lam.train_model --eval test`: the forecast
+5. `src/convert_output.py`: DANRA-like output datasets
+
+It's configured through environment variables:
+
+| Variable | Default | |
+|---|---|---|
+| `ANALYSIS_TIME` | (required) | DINI analysis time, e.g. `2026-10-01T00:00Z` |
+| `FORECAST_DURATION` | `PT18H` | multiple of 3 h, between 6 h and DINI forecast length − 6 h (30 h for a 36 h DINI run) |
+| `BOUNDARY_SOURCE` | `dini` | `dini` or `ifs` |
+| `DINI_ROOT` | `s3://harmonie-zarr/dini/control/{analysis}/` | DINI forecast zarrs |
+| `IFS_BOUNDARY_PATH` | | IFS forecast zarr, required for `BOUNDARY_SOURCE=ifs` |
+| `INFERENCE_WORKDIR` | `./inference_workdir` | |
+| `INFERENCE_ARTIFACT_PATH` | `./inference_artifact` | |
+| `MLWM_DEBUGGER` | | `ipdb` to debug the python steps on exceptions |
+
+Outside the container, run it from `configurations/ANNA` in the uv
+environment, with AWS credentials for reading DINI (e.g. `AWS_PROFILE`):
+
+```bash
+ANALYSIS_TIME=2026-10-01T00:00Z FORECAST_DURATION=PT18H ./entry.sh
 ```
+
+In the container: `run_inference_container.sh` still has the interface from
+before these changes, and is to be updated (step 7 in
+[INFERENCE_PLAN.md](INFERENCE_PLAN.md)).
+
+### Outputs and conventions
+
+`${INFERENCE_WORKDIR}/outputs/single_levels.zarr` (pres_seasurface, t2m, u10m,
+v10m, pres0m, lwavr0m, swavr0m) and `pressure_levels.zarr` (z, t, r, u, v, tw
+at 100–1000 hPa) are on the DANRA grid at valid times T+6 h …
+T+`FORECAST_DURATION` in 3 h steps. The initial states are DINI at T+0 and
+T+3 h. The conventions are DANRA's:
+
+- **winds are relative to the DANRA (Lambert) grid**, not east/north
+- relative humidity `r` is a fraction (0–1)
+- `lwavr0m`/`swavr0m` are net surface radiation fluxes
+- `tw` is geometric vertical velocity (m/s)
+
+## Known limitations
+
+- **DINI boundary.** 25% of ANNA's boundary points (4,573 of 18,014) lie
+  outside the DINI domain, mostly to the east and north. They are filled with
+  the value of the nearest DINI grid point. IFS covers the whole ring and is
+  the preferred boundary source once the IFS zarr is available.
+
+  ![ANNA boundary points vs the DINI domain](docs/anna_boundary_vs_dini.png)
+
+- **Placeholder boundary statistics** until the exact ERA5 statistics have
+  been computed (see above).
+- **DINI zarr retention** is two weeks. Keep regridded development cases
+  locally in `dev-data/` (gitignored).
+
+## Development
+
+- [dev-utils/](dev-utils/):
+  - `assemble_artifact.py`: build `inference_artifact/`
+  - `compute_era5_boundary_stats.py`: exact ERA5 boundary training statistics
+  - `sanitize_checkpoint.py`: make the gefion-1 checkpoint loadable
+  - `check_checkpoint_compat.py`: strict checkpoint load and one-step forecast
+    on synthetic data
+  - `plot_boundary_coverage.py`: the boundary coverage map above
+- Tests:
+  ```bash
+  uv run --project configurations/ANNA --with pytest \
+      python -m pytest configurations/ANNA/tests
+  ```
+- The `src/` scripts can also be run on their own; see their `--help` and
+  docstrings.
