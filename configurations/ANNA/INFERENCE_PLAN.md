@@ -159,6 +159,10 @@ Findings from the data that shaped it (don't trust the metadata labels):
 - **Boundary derived fields:** `q` uses the IFS/ERA5 mixed-phase saturation vapour pressure. `ω = −ρ g w` is hydrostatic, with virtual temperature.
 - **DINI chunks** are one time × one level × the full field, so each field read is about 24 MB (float64).
 - **25% of the training boundary points (4,573 of 18,014) are outside DINI.** Only 733 are north of 69.9°N; 2,180 are east of 30°E, reaching south to 40.5°N, because DINI's Lambert grid (centred on 8°W) tilts westward at its eastern edge. With `--outside-domain nearest` (the default) they take the value of the nearest DINI edge point, and the count is recorded in the output attrs; `error` refuses instead. This makes the DINI-only boundary a rough approximation over a quarter of the ring, so **IFS (step 9), or DINI blended with IFS outside the DINI domain, is the better boundary source**. **Decision (user):** use the DINI boundary with nearest-edge fill for now, so the pipeline runs end to end, and switch the default to IFS once the IFS zarr exists.
+
+  ![ANNA training boundary points vs the DINI domain](docs/anna_boundary_vs_dini.png)
+
+  *The 18,014 boundary points ANNA was trained with (the ERA5 0.25° ring, 7.19° around the DANRA interior), blue where DINI covers them and orange where it doesn't. The solid outline is the DINI domain and the dashed one the DANRA interior. Most uncovered points are east of DINI (Baltic states to the Black Sea, eastern Finland) and north of it (northern Norway, Kola, Barents Sea), with a thin strip along DINI's southern edge over Spain. Made with `dev-utils/plot_boundary_coverage.py`.*
 - **Boundary box east edge = 39.5°E exactly.** With 40.0°E, cropping gave 18,063 points (49 not used in training). Fixed in the regridder and in the IFS contract.
 - **Smoothing before sampling the boundary** (`--boundary-smoothing-km`, default 25 km = 13 × 13 DINI cells). Point samples of 2 km DINI kept small-scale vertical velocity: normalised std 3–4.6 at 850–1000 hPa, against 0.25° ERA5 stats. With smoothing these are in range.
 
