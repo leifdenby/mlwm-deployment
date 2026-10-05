@@ -180,7 +180,27 @@ Original step description:
   - Writes `boundary.zarr`.
 - Fail if any boundary point falls outside the DINI domain. This **will** trip on the northern edge (boundary up to 71.5°N, DINI up to 69.9°N); see Open issues.
 
-### 5. `src/create_inference_dataset.py`
+### 5. `src/create_inference_dataset.py` — IMPLEMENTED, final check pending
+Rewritten as an ANNA-specific CLI: `--artifact --interior-dir --boundary --boundary-source {dini,ifs} --analysis-time --forecast-duration --workdir`. It writes `danra_model1_config.{yaml,zarr}`, `{dini,ifs}_7deg_model1_config.{yaml,zarr}` and `config.yaml` (neural-lam) to the workdir:
+- **Interior:** inputs come from the regridded zarrs. The time range runs from the analysis time to analysis + duration + 2 steps, with train/val/test all equal to it. There's no `compute_statistics`; the DANRA *training* stats from the artifact are merged in (statistics variables only, the feature metadata describes the inference data).
+- **Boundary:** the config is used as-is with the input path set, and cropping points at the inference interior config by absolute path. The script checks that the lead times reach analysis + duration + 6 h.
+- **neural-lam config:** datastores in the workdir, and `overload_stats_path` pointing at the artifact's ERA5 stats datastore by absolute path.
+
+Checked on DINI 2026-09-26T18Z (before the DINI zarr source disappeared, see below):
+- the interior datastore has 55/5/2 features on 464,721 points, the boundary 58/2 on the **18,014 training points**;
+- both load in neural-lam (`load_config_and_datastores`), the boundary as forecast data;
+- boundary standardisation == ERA5 training stats (overload works), and interior == DANRA training stats.
+- **Still to check:** building the neural-lam test sample (`WeatherDataModule`, one forecast step). This needs a fresh DINI run with ≥ 5 interior steps.
+
+Learned (for step 6):
+- **Init-time filtering:** neural-lam's eval sampler only supports init times 00/12 UTC, and `train_model` defaults to `--eval_init_times 0 12`. Pass an empty `--eval_init_times` to disable the filter. With the datastore covering exactly one forecast there is exactly one sample.
+- **`--ar_steps_eval` = duration / 3 h − 1.** The initial states are at T+0 and T+3 h, so predictions run from T+6 h to T+duration. The script logs the value. The minimum duration is 6 h.
+- **The interior needs two extra steps**, T+0 … T+duration+6 h. One is for `num_future_forcing_steps=1`, and one more because `WeatherDataset.__len__` counts `n_times − (2 + ar_steps) − future_forcing_steps`, one step more conservative than the data a sample uses. The boundary needs T+duration+6 h. **So a 36 h DINI run supports forecasts up to 30 h.**
+- `regrid_dini.py` now sets correct `units` attrs (relative humidity is `1`, a fraction), and rounds the number of boundary steps up.
+
+**DINI data source:** `s3://harmonie-zarr/dini/control/` was empty as of 2026-10-05, though the bucket still exists and other buckets are readable. `s3://zarr-from-dini/` only has raw DINI GRIB from 2025-02. The current location and retention of the DINI zarrs needs finding out.
+
+Original step description:
 - `FP_TRAINING_CONFIG` → `inference_artifact/configs/7deg_config.yaml` (the current `config.yaml` doesn't exist).
 - Also rewrite `datastore_boundary.config_path`, not just `datastore`/`datastores`.
 - The interior keeps its PT3H `coord_ranges`. The boundary configs (IFS/DINI) are used as-is with only the input paths set. Make sure the boundary store's lead times extend one boundary step past the forecast (`num_future_boundary_steps=1`).

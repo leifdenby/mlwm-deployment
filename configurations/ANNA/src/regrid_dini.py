@@ -61,6 +61,12 @@ EPSILON = 0.621981  # R_dry / R_vapour
 LEVELS = [100, 200, 400, 600, 700, 850, 925, 1000]  # hPa, as used by ANNA
 INTERIOR_STEP = datetime.timedelta(hours=3)
 BOUNDARY_STEP = datetime.timedelta(hours=6)
+# interior time steps needed beyond analysis_time + forecast_duration: one for
+# `num_future_forcing_steps=1`, and one more because neural-lam's
+# WeatherDataset counts samples as
+# `n_times - (2 + ar_steps) - num_future_forcing_steps`, one step more
+# conservative than the data a sample actually uses
+INTERIOR_EXTRA_STEPS = 2
 
 # ERA5 (WeatherBench2) 0.25 deg box covering the boundary points ANNA was
 # trained with (lat 40.50..71.50, lon -26.25..39.50), as in the contract in
@@ -80,6 +86,45 @@ BOUNDARY_SL_VARS = {
     "pres0m": "surface_pressure",
 }  # plus 10m winds
 BOUNDARY_PL_VARS = {"z": "geopotential", "t": "temperature"}  # plus u, v, q, w
+
+# units of the output variables (metadata only, they end up as the
+# `*_feature_units` coordinates of the inference datastores). NB: relative
+# humidity is a fraction, even though DANRA labels it "%"
+UNITS = {
+    "pres_seasurface": "Pa",
+    "t2m": "K",
+    "pres0m": "Pa",
+    "lwavr0m": "W m**-2",
+    "swavr0m": "W m**-2",
+    "u10m": "m s**-1",
+    "v10m": "m s**-1",
+    "z": "m**2 s**-2",
+    "t": "K",
+    "r": "1",
+    "tw": "m s**-1",
+    "u": "m s**-1",
+    "v": "m s**-1",
+    "mean_sea_level_pressure": "Pa",
+    "2m_temperature": "K",
+    "surface_pressure": "Pa",
+    "10m_u_component_of_wind": "m s**-1",
+    "10m_v_component_of_wind": "m s**-1",
+    "geopotential": "m**2 s**-2",
+    "temperature": "K",
+    "u_component_of_wind": "m s**-1",
+    "v_component_of_wind": "m s**-1",
+    "specific_humidity": "kg kg**-1",
+    "vertical_velocity": "Pa s**-1",
+    "land_sea_mask": "1",
+    "geopotential_at_surface": "m**2 s**-2",
+}
+
+
+def _set_units(ds):
+    for v in ds.data_vars:
+        if v in UNITS:
+            ds[v].attrs["units"] = UNITS[v]
+    return ds
 
 
 def grid_x_axis_angle(lat, lon):
@@ -196,8 +241,11 @@ def _dini_transformer(ds_sl):
 
 
 def _valid_times(ds, analysis_time, duration, step):
-    """Valid times analysis_time, +step, ... up to analysis_time + duration."""
-    n = int(duration / step)
+    """
+    Valid times analysis_time, +step, ... up to (at least) analysis_time +
+    duration.
+    """
+    n = int(np.ceil(duration / step))
     times = [
         np.datetime64(analysis_time + k * step, "ns") for k in range(n + 1)
     ]
@@ -284,7 +332,7 @@ def _regrid_interior(
         {v: (("time", "pressure") + dims[1:], a) for v, a in pl.items()},
         coords=dict(coords, pressure=("pressure", LEVELS, {"units": "hPa"})),
     )
-    return ds_sl_out, ds_pl_out, interp.n_outside
+    return _set_units(ds_sl_out), _set_units(ds_pl_out), interp.n_outside
 
 
 def smooth(field, n_cells):
@@ -408,7 +456,7 @@ def _regrid_boundary(
         ("latitude", "longitude"),
         sample(ds_sl["orography"].values) * GRAVITY,
     )
-    return ds, interp
+    return _set_units(ds), interp
 
 
 def regrid(
@@ -430,11 +478,12 @@ def regrid(
     output.mkdir(parents=True, exist_ok=True)
 
     if interior:
-        # one extra interior step for `num_future_forcing_steps=1`
+        # two interior steps beyond the forecast are needed, see
+        # INTERIOR_EXTRA_STEPS
         times = _valid_times(
             ds_sl,
             analysis_time,
-            forecast_duration + INTERIOR_STEP,
+            forecast_duration + INTERIOR_EXTRA_STEPS * INTERIOR_STEP,
             INTERIOR_STEP,
         )
         ds_sl_out, ds_pl_out, n_outside = _regrid_interior(

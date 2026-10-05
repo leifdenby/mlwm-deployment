@@ -1,613 +1,329 @@
-import copy
+"""
+Create the inference datastores and neural-lam config for running ANNA
+(gefion-1) from regridded DINI (interior) and DINI or IFS (boundary) data.
+
+Inputs:
+- the inference artifact (`dev-utils/assemble_artifact.py`), providing the
+  datastore configs, the neural-lam configs and the training statistics
+- the regridded interior (`interior_{single,pressure}_levels.zarr` from
+  `regrid_dini.py`)
+- the boundary forecast in the IFS contract layout: `boundary.zarr` from
+  `regrid_dini.py` (DINI boundary) or a converted IFS forecast
+
+Written to the inference workdir (neural-lam opens `{name}.zarr` next to each
+`{name}.yaml`):
+- `danra_model1_config.{yaml,zarr}`: interior datastore covering
+  analysis_time .. analysis_time + forecast_duration (+ one step for
+  `num_future_forcing_steps=1`), with the DANRA *training* statistics merged
+  in (statistics are not computed from the inference data)
+- `{dini,ifs}_7deg_model1_config.{yaml,zarr}`: boundary datastore, cropped to
+  the boundary points around the interior; normalised with the ERA5 training
+  statistics in the artifact (`overload_stats_path`)
+- `config.yaml`: neural-lam config referencing the above
+
+NB: mllam-data-prep configs must never be written with sorted keys, that
+would reorder inputs/variables and so the features the checkpoint expects.
+
+Usage:
+    python create_inference_dataset.py --artifact inference_artifact \\
+        --interior-dir inference_workdir/inputs \\
+        --boundary inference_workdir/inputs/boundary.zarr --boundary-source dini \\
+        --analysis-time 2026-09-26T18:00 --forecast-duration PT18H \\
+        --workdir inference_workdir
+"""
+import argparse
 import datetime
 import os
 from pathlib import Path
-from typing import Dict, Optional
 
 import isodate
 import mllam_data_prep as mdp
 import mllam_data_prep.config as mdp_config
-import parse
+import numpy as np
 import xarray as xr
+import yaml
 from loguru import logger
-from neural_lam.config import DatastoreSelection, NeuralLAMConfig
 
-FP_TRAINING_CONFIG = "inference_artifact/configs/config.yaml"
-DATASTORE_INPUT_PATH_FORMAT = "{datastore_name}.{input_name}={input_path}"
-DATASTORE_RENAME_VARIABLES_ITEM_FORMAT = "{datastore_name}:{from_name}:{to_name}"
-def _parse_datastore_input_paths(s: str) -> Dict[str, Dict[str, str]]:
+INTERIOR_NAME = "danra_model1_config"
+BOUNDARY_NAMES = dict(
+    dini="dini_7deg_model1_config", ifs="ifs_7deg_model1_config"
+)
+NL_CONFIG_NAMES = dict(
+    dini="7deg_config_dini.yaml", ifs="7deg_config_ifs.yaml"
+)
+# interior time step and the boundary time step ANNA was trained with
+INTERIOR_STEP = datetime.timedelta(hours=3)
+BOUNDARY_STEP = datetime.timedelta(hours=6)
+# interior time steps needed beyond analysis_time + forecast_duration: one for
+# `num_future_forcing_steps=1`, and one more because neural-lam's
+# WeatherDataset counts samples as
+# `n_times - (2 + ar_steps) - num_future_forcing_steps`, one step more
+# conservative than the data a sample actually uses (same as in
+# regrid_dini.py)
+INTERIOR_EXTRA_STEPS = 2
+
+
+def ar_steps_for(forecast_duration):
     """
-    Parse a comma-separated list of {datastore_name}.{input_name}={input_path}
-    into a dictionary of dictionaries.
-
-    Parameters
-    ----------
-    s : str
-        The string to parse.
-
-    Returns
-    -------
-    Dict[str, Dict[str, str]]
-        A dictionary of dictionaries.
+    Autoregressive steps for a forecast: the initial states are at the
+    analysis time and +3h, the predictions at +6h .. +forecast_duration.
     """
-    result = {}
-    for item in s.split(","):
-        parts = parse.parse(DATASTORE_INPUT_PATH_FORMAT, item)
-        if parts is None:
-            raise ValueError(
-                f"Invalid format for DATASTORE_INPUT_PATHS item: {item}. "
-                f"Expected format is {DATASTORE_INPUT_PATH_FORMAT}"
-            )
-        datastore_name = parts["datastore_name"]
-        input_name = parts["input_name"]
-        input_path = parts["input_path"]
-
-        if datastore_name not in result:
-            result[datastore_name] = {}
-        elif input_name in result[datastore_name]:
-            raise ValueError(
-                f"Duplicate input name {input_name} for datastore "
-                f"{datastore_name} in DATASTORE_INPUT_PATHS"
-            )
-        result[datastore_name][input_name] = input_path
-    return result
+    return int(forecast_duration / INTERIOR_STEP) - 1
 
 
-def _parse_datastore_rename_variables(s: str) -> Dict[str, Dict[str, str]]:
-    """
-    Parse a comma-separated list of {datastore_name}:{from_name}:{to_name}
-    into a dictionary of dictionaries.
-
-    Parameters
-    ----------
-    s : str
-        The string to parse.
-
-    Returns
-    -------
-    Dict[str, Dict[str, str]]
-        A dictionary of dictionaries where keys are datastore names and values
-        are mappings from variable names in the config to variable names in the
-        input dataset.
-    """
-    result = {}
-    if not s.strip():
-        return result
-
-    for item in s.split(","):
-        parts = parse.parse(DATASTORE_RENAME_VARIABLES_ITEM_FORMAT, item)
-        if parts is None:
-            raise ValueError(
-                f"Invalid format for DATASTORE_RENAME_VARIABLES item: {item}. "
-                f"Expected format is {DATASTORE_RENAME_VARIABLES_ITEM_FORMAT}"
-            )
-
-        datastore_name = parts["datastore_name"]
-        from_name = parts["from_name"]
-        to_name = parts["to_name"]
-
-        if datastore_name not in result:
-            result[datastore_name] = {}
-        elif from_name in result[datastore_name]:
-            raise ValueError(
-                f"Duplicate rename rule for variable {from_name} in datastore "
-                f"{datastore_name} in DATASTORE_RENAME_VARIABLES"
-            )
-        result[datastore_name][from_name] = to_name
-
-    return result
+SPLIT_NAMES = ["train", "val", "test"]
+INTERIOR_INPUT_FILES = dict(
+    danra_sl_state="interior_single_levels.zarr",
+    danra_pl_state="interior_pressure_levels.zarr",
+    danra_static="interior_single_levels.zarr",
+    danra_forcing="interior_single_levels.zarr",
+)
 
 
-REQUIRED_ENV_VARS = {
-    # comma-separated list of {datastore_name}:{input_name}={input_path}
-    "DATASTORE_INPUT_PATHS": _parse_datastore_input_paths,
-    # iso8601 datetime string, e.g. 2019-02-04T12:00+0000
-    "ANALYSIS_TIME": isodate.parse_datetime,
-    # iso8160 duration string, e.g. PT6H for 6 hours
-    "FORECAST_DURATION": isodate.parse_duration,
-    # comma-separated list of time dimensions to replace, e.g.
-    # time,forecast_reference_time
-    "TIME_DIMENSIONS": lambda s: s.split(","),
-    # inference working directory, relative to where inference config and
-    # datasets are saved
-    "INFERENCE_WORKDIR": str,
-}
-
-OPTIONAL_ENV_VARS = {
-    # comma-separated list of {datastore_name}:{from_name}:{to_name}, where
-    # from_name is the variable in the config and to_name is the variable in
-    # the input dataset.
-    "DATASTORE_RENAME_VARIABLES": _parse_datastore_rename_variables,
-}
+def _write_config(config, fp):
+    # NB: sort_keys=False, sorting would change the feature order
+    config.to_yaml_file(fp, sort_keys=False)
 
 
-def _parse_env_vars() -> Dict[str, any]:
-    """
-    Parse and validate required environment variables.
-
-    Returns
-    -------
-    Dict[str, any]
-        A dictionary of parsed environment variables.
-    """
-    env_vars = {}
-    for var, parser in REQUIRED_ENV_VARS.items():
-        value = os.getenv(var)
-        if value is None:
-            raise EnvironmentError(f"Environment variable {var} is not set.")
-        try:
-            env_vars[var] = parser(value)
-        except Exception as e:
-            raise ValueError(f"Error parsing environment variable {var}: {e}")
-
-    for var, parser in OPTIONAL_ENV_VARS.items():
-        value = os.getenv(var)
-        if value is None:
-            env_vars[var] = {}
-            continue
-        try:
-            env_vars[var] = parser(value)
-        except Exception as e:
-            raise ValueError(f"Error parsing environment variable {var}: {e}")
-
-    return env_vars
-
-
-def _rename_input_variables_for_datastore(
-    config: mdp.Config,
-    datastore_name: str,
-    rename_variables: Dict[str, Dict[str, str]],
-) -> None:
-    """
-    Apply variable rename rules to all inputs in a datastore config.
-
-    Parameters
-    ----------
-    config : mdp.Config
-        The datastore config to update.
-    datastore_name : str
-        The name of the datastore for selecting rename rules.
-    rename_variables : Dict[str, Dict[str, str]]
-        Mapping of datastore_name to {from_name: to_name}.
-    """
-    datastore_renames = rename_variables.get(datastore_name, {})
-    if len(datastore_renames) == 0:
-        return
-
-    did_rename = False
-    available_variables = set()
-    for input_name in config.inputs.keys():
-        input_config = config.inputs[input_name]
-        if not hasattr(input_config, "variables") or input_config.variables is None:
-            continue
-
-        if isinstance(input_config.variables, dict):
-            renamed_variables = {}
-            variable_iterable = input_config.variables.items()
-        else:
-            renamed_variables = []
-            variable_iterable = ((variable, None) for variable in input_config.variables)
-
-        for variable, variable_config in variable_iterable:
-            available_variables.add(variable)
-            renamed_variable = datastore_renames.get(variable, variable)
-            if renamed_variable != variable:
-                did_rename = True
-                logger.info(
-                    f"Renaming variable for datastore {datastore_name}: "
-                    f"{variable} -> {renamed_variable} (input: {input_name})"
-                )
-            if isinstance(renamed_variables, dict):
-                renamed_variables[renamed_variable] = variable_config
-            else:
-                renamed_variables.append(renamed_variable)
-
-        input_config.variables = renamed_variables
-
-    if not did_rename:
-        raise ValueError(
-            f"DATASTORE_RENAME_VARIABLES for datastore {datastore_name} did not "
-            f"match any configured variables. Available variables are: "
-            f"{sorted(available_variables)}"
+def _create_interior_datastore(
+    artifact, interior_dir, analysis_time, interior_end, workdir
+):
+    config = mdp.Config.from_yaml_file(
+        artifact / "configs" / f"{INTERIOR_NAME}.yaml"
+    )
+    for input_name, input_config in config.inputs.items():
+        input_config.path = str(
+            (interior_dir / INTERIOR_INPUT_FILES[input_name]).resolve()
         )
 
-
-def _create_inference_datastore_config(
-    training_config: mdp.Config,
-    forecast_analysis_time: datetime.datetime,
-    forecast_duration: datetime.timedelta,
-    time_dimensions: list[str],
-    overwrite_input_paths: Dict[str, str] = {},
-) -> mdp.Config:
-    """
-    From a training datastore config, create an inference datastore config that:
-    - samples along a new sampling dimension `sampling_dim` (default:
-      `analysis_time`) instead of `time`
-    - has a single split called "test" with a single time slice given by the
-      `forecast_analysis_time` argument
-    - optionally overwrites input paths with the `overwrite_input_paths` argument
-    - ensures that the output variables have the correct dimensions, for example
-      replacing `time` with [`analysis_time`, `elapsed_forecast_duration`]
-    - ensures that the input datasets have the correct dimensions and dim_mappings,
-      i.e. replacing `time` with [`analysis_time`, `elapsed_forecast_duration`
-
-    Parameters
-    ----------
-    training_config : mdp.Config
-        The training config to base the inference config on
-    forecast_analysis_time : datetime.datetime
-        The analysis time to use for the inference config
-    forecast_duration : datetime.timedelta
-        The forecast duration to use for the inference config
-    time_dimensions : list[str], optional
-        The list of time dimensions to replace `time` with, for example
-        replacing `time` with [`analysis_time`, `elapsed_forecast_duration`],
-        the first dimension is assumed to be the sampling dimension (e.g. the
-        analysis time)
-    overwrite_input_paths : Dict[str, str], optional
-        A dictionary of input names and paths to overwrite in the training config,
-        by default {}
-
-    Returns
-    -------
-    mdp.Config
-        The inference config
-    """
-    # the new sampling dimension is `analysis_time`
-    old_sampling_dim = "time"
-    if not isinstance(time_dimensions, list) or len(time_dimensions) == 0:
-        raise ValueError(
-            "time_dimensions must be a non-empty list of strings, got "
-            f"{time_dimensions}"
-        )
-    sampling_dim = time_dimensions[0]
-    # instead of only having `time` as dimension, the input forecast datasets
-    # have two dimensions that describe the time value [analysis_time,
-    # elapsed_forecast_duration]
-    dim_replacements = dict(
-        time=time_dimensions,
-    )
-    # there will be a single split called "test"
-    # split_name = "test"
-    # which will have a single time slice, given by the analysis time argument
-    # to the script
-    sampling_coord_range = dict(
-        start=forecast_analysis_time,
-        end=forecast_analysis_time + forecast_duration,
-    )
-
-    inference_config = copy.deepcopy(training_config)
-
-    if len(overwrite_input_paths) > 0:
-        for key, value in overwrite_input_paths.items():
-            if key not in training_config.inputs:
-                raise ValueError(
-                    f"Key {key} not found in config inputs. "
-                    f"Available keys are: {list(training_config.inputs.keys())}"
-                )
-            logger.info(
-                f"Overwriting input path for {key} with {value} previously "
-                f"{training_config.inputs[key].path}"
-            )
-            inference_config.inputs[key].path = value
-
-    # setup the split (test) for the dataset with a coordinate range along the
-    # sampling dimension (analysis_time) of length 1
-    # XXX: this can't currently be used, as in we have to have train, val and
-    # test splits for now (see below)
-    # inference_config.output.splitting = mdp_config.Splitting(
-    #     dim=sampling_dim,
-    #     splits={split_name: mdp_config.Split(**sampling_coord_range)},
-    # )
-
-    # XXX: currently (as of 0.4.0) neural-lam requires that `train`, `val` and
-    # `test` splits are always present, even if they are not used. So we
-    # create empty `train` and `val` splits here
-    inference_config.output.splitting = mdp_config.Splitting(
-        dim="time",
-        splits={
-            "train": mdp_config.Split(
-                start=forecast_analysis_time, end=forecast_analysis_time
-            ),
-            "val": mdp_config.Split(
-                start=forecast_analysis_time, end=forecast_analysis_time
-            ),
-            "test": mdp_config.Split(
-                start=forecast_analysis_time,
-                end=forecast_analysis_time + forecast_duration,
-            ),
-        },
-    )
-
-    # ensure the output data is sampled along the sampling dimension
-    # (analysis_time) too
-    inference_config.output.coord_ranges = {
-        sampling_dim: mdp_config.Range(**sampling_coord_range)
+    start, end = analysis_time.isoformat(), interior_end.isoformat()
+    config.output.coord_ranges["time"].start = start
+    config.output.coord_ranges["time"].end = end
+    # neural-lam requires train/val/test splits, the forecast is run on "test".
+    # Statistics are not computed from the inference data, the training
+    # statistics are merged in below
+    config.output.splitting.splits = {
+        name: mdp_config.Split(start=start, end=end) for name in SPLIT_NAMES
     }
 
-    inference_config.output.chunking = {sampling_dim: 1}
+    fp_config = workdir / f"{INTERIOR_NAME}.yaml"
+    _write_config(config, fp_config)
 
-    # replace old sampling_dimension (time) dimension in outputs with
-    # [`analysis_time`, `elapsed_forecast_time`]
-    for variable, dims in training_config.output.variables.items():
-        if old_sampling_dim in dims:
-            orig_sampling_dim_index = dims.index(old_sampling_dim)
-            dims.remove(old_sampling_dim)
-            for dim in dim_replacements[old_sampling_dim][::-1]:
-                dims.insert(orig_sampling_dim_index, dim)
-            inference_config.output.variables[variable] = dims
-            logger.info(
-                f"Replaced {old_sampling_dim} dimension with"
-                f" {dim_replacements[old_sampling_dim]} for {variable}"
+    ds = mdp.create_dataset(config=config)
+    ds_stats = xr.open_zarr(
+        artifact / "stats" / f"{INTERIOR_NAME}.stats.zarr"
+    ).load()
+    for category in ["state", "forcing", "static"]:
+        dim = f"{category}_feature"
+        if dim in ds_stats.dims and list(ds_stats[dim].values) != list(
+            ds[dim].values
+        ):
+            raise ValueError(
+                f"{category} features of the inference dataset don't match "
+                "those of the training statistics"
             )
+    # only merge the statistics themselves, the feature metadata coordinates
+    # (units, long names) describe the inference data
+    stats_vars = [v for v in ds_stats.data_vars if "__train__" in v]
+    ds_stats = ds_stats[stats_vars].reset_coords(drop=True)
+    ds = xr.merge([ds, ds_stats], join="exact", combine_attrs="override")
 
-    # these dimensions should also be "renamed" from the input datasets
-    for input_name in training_config.inputs.keys():
-        if "time" in training_config.inputs[input_name].dim_mapping:
-            dims = training_config.inputs[input_name].dims
-            orig_sampling_dim_index = dims.index(old_sampling_dim)
-            dims.remove(old_sampling_dim)
-            for dim in dim_replacements[old_sampling_dim][::-1]:
-                dims.insert(orig_sampling_dim_index, dim)
-            inference_config.inputs[input_name].dims = dims
-
-            del inference_config.inputs[input_name].dim_mapping[
-                old_sampling_dim
-            ]
-
-            # add new "rename" dim-mappins for `analysis_time` and
-            # `elapsed_forecast_duration`
-            for dim in dim_replacements[old_sampling_dim]:
-                inference_config.inputs[input_name].dim_mapping[
-                    dim
-                ] = mdp_config.DimMapping(method="rename", dim=dim)
-
-    return inference_config
-
-
-def _prepare_inference_dataset_zarr(
-    datastore_name: str,
-    datastore_input_paths: Dict[str, str],
-    fp_inference_workdir: str,
-    analysis_time: datetime.datetime,
-    forecast_duration: datetime.timedelta,
-    time_dimensions: list[str],
-    rename_variables: Dict[str, Dict[str, str]],
-    drop_time_inputs: Optional[Dict[str, set[str]]] = None,
-) -> str:
-    """
-    Prepare the inference dataset for a single datastore.
-
-    Parameters
-    ----------
-    datastore_name : str
-        The name of the datastore to prepare the inference dataset for, this
-        sets the expected path of the training datastore config and stats.
-    datastore_input_paths : Dict[str, str]
-        A dictionary of input names and paths to overwrite in the training
-        config.
-    fp_inference_workdir : str
-        The path to the inference working directory, where the inference
-        datastore config(s) and zarr dataset(s) will be saved.
-    analysis_time : datetime.datetime
-        The analysis time to use for the inference dataset.
-    forecast_duration : datetime.timedelta
-        The forecast duration to use for the inference dataset.
-    time_dimensions : list[str]
-        The list of time dimensions to replace `time` with, for example
-        replacing `time` with [`analysis_time`, `elapsed_forecast_duration`]
-
-    Returns
-    -------
-    str
-        The path to the inference datastore config file. The inference dataset
-        is saved as a zarr store in the same directory as the config file, with
-        the same name but with a .zarr extension instead of .yaml.
-    """
-    # fp_training_datastore_stats = (
-    #     f"inference_artifact/stats/{datastore_name}.datastore.stats.zarr"
-    # )
-    fp_training_datastore_stats = (
-        f"inference_artifact/stats/{datastore_name}.stats.zarr"
+    n_missing = {
+        v: int(ds[v].isnull().sum()) for v in ["state", "forcing", "static"]
+    }
+    if any(n_missing.values()):
+        raise ValueError(
+            f"missing values in the interior datastore: {n_missing}"
+        )
+    ds.to_zarr(workdir / f"{INTERIOR_NAME}.zarr", mode="w", consolidated=True)
+    logger.info(
+        f"interior datastore: {ds.time.size} time steps {start} .. {end}, "
+        f"{ds.grid_index.size} grid points"
     )
-    ds_stats = xr.open_dataset(fp_training_datastore_stats)
-    logger.debug(f"Opened stats dataset: {ds_stats}")
+    return fp_config
 
-    # fp_training_datastore_config = (
-    #     f"inference_artifact/configs/{datastore_name}.datastore.yaml"
-    # )
-    fp_training_datastore_config = (
-        f"inference_artifact/configs/{datastore_name}.yaml"
+
+def _create_boundary_datastore(
+    artifact,
+    boundary_source,
+    fp_boundary,
+    fp_interior_config,
+    boundary_end,
+    workdir,
+):
+    name = BOUNDARY_NAMES[boundary_source]
+    config = mdp.Config.from_yaml_file(artifact / "configs" / f"{name}.yaml")
+    for input_config in config.inputs.values():
+        input_config.path = str(Path(fp_boundary).resolve())
+    # crop around the (small) inference interior dataset, rather than the
+    # training interior dataset. The path is resolved relative to the CWD by
+    # mllam-data-prep, so make it absolute
+    config.output.domain_cropping.interior_dataset_config_path = str(
+        fp_interior_config.resolve()
     )
 
-    logger.debug(
-        f"Loading training datastore config from {fp_training_datastore_config}"
-    )
-    datastore_training_config = mdp.Config.from_yaml_file(
-        fp_training_datastore_config
-    )
+    fp_config = workdir / f"{name}.yaml"
+    _write_config(config, fp_config)
+    ds = mdp.create_dataset(config=config)
 
-    inference_config = _create_inference_datastore_config(
-        training_config=datastore_training_config,
-        forecast_analysis_time=analysis_time,
-        forecast_duration=forecast_duration,
-        overwrite_input_paths=datastore_input_paths,
-        time_dimensions=time_dimensions,
+    valid_times = (
+        ds.analysis_time.values[:, None] + ds.elapsed_forecast_duration.values
     )
-    _rename_input_variables_for_datastore(
-        config=inference_config,
-        datastore_name=datastore_name,
-        rename_variables=rename_variables,
+    needed = np.datetime64(boundary_end, "ns")
+    if valid_times.max() < needed:
+        raise ValueError(
+            f"boundary forecast ends at {valid_times.max()}, but must reach "
+            f"{needed}"
+        )
+    n_missing = {v: int(ds[v].isnull().sum()) for v in ["forcing", "static"]}
+    if any(n_missing.values()):
+        raise ValueError(
+            f"missing values in the boundary datastore: {n_missing}"
+        )
+    ds.to_zarr(workdir / f"{name}.zarr", mode="w", consolidated=True)
+    logger.info(
+        f"boundary datastore ({boundary_source}): analysis time(s) "
+        f"{ds.analysis_time.values}, {ds.elapsed_forecast_duration.size} lead "
+        f"times, {ds.grid_index.size} grid points"
     )
+    return fp_config
 
-    fp_inference_datastore_config = (
-        f"{fp_inference_workdir}/{datastore_name}.datastore.yaml"
-    )
 
-    Path(fp_inference_datastore_config).parent.mkdir(
-        parents=True, exist_ok=True
+def _create_neural_lam_config(
+    artifact, boundary_source, fp_interior_config, fp_boundary_config, workdir
+):
+    nl_config = yaml.safe_load(
+        (artifact / "configs" / NL_CONFIG_NAMES[boundary_source]).read_text()
+    )
+    nl_config["datastore"]["config_path"] = fp_interior_config.name
+    boundary = nl_config["datastore_boundary"]
+    boundary["config_path"] = fp_boundary_config.name
+    # the ERA5 training statistics (stats datastore) in the artifact. neural-lam
+    # joins this onto the config directory, so use an absolute path
+    boundary["overload_stats_path"] = str(
+        (artifact / "configs" / boundary["overload_stats_path"]).resolve()
+    )
+    fp_config = workdir / "config.yaml"
+    fp_config.write_text(yaml.safe_dump(nl_config, sort_keys=False))
+    logger.info(f"neural-lam config written to {fp_config}")
+    return fp_config
+
+
+def create_inference_datasets(
+    artifact,
+    interior_dir,
+    boundary,
+    boundary_source,
+    analysis_time,
+    forecast_duration,
+    workdir,
+):
+    artifact, interior_dir, workdir = (
+        Path(artifact),
+        Path(interior_dir),
+        Path(workdir),
+    )
+    workdir.mkdir(parents=True, exist_ok=True)
+    # the initial states are at analysis_time and +3h, so the first prediction
+    # is at +6h
+    if (
+        forecast_duration < 2 * INTERIOR_STEP
+        or forecast_duration % INTERIOR_STEP
+    ):
+        raise ValueError(
+            f"forecast duration must be a multiple of {INTERIOR_STEP} and at "
+            f"least {2 * INTERIOR_STEP}"
+        )
+    interior_end = (
+        analysis_time
+        + forecast_duration
+        + INTERIOR_EXTRA_STEPS * INTERIOR_STEP
+    )
+    # one boundary step after the forecast for `num_future_boundary_steps=1`
+    boundary_end = analysis_time + forecast_duration + BOUNDARY_STEP
+
+    fp_interior_config = _create_interior_datastore(
+        artifact, interior_dir, analysis_time, interior_end, workdir
+    )
+    fp_boundary_config = _create_boundary_datastore(
+        artifact,
+        boundary_source,
+        boundary,
+        fp_interior_config,
+        boundary_end,
+        workdir,
     )
     logger.info(
-        f"Saving inference datastore config to {fp_inference_datastore_config}"
+        f"forecast {analysis_time} + {forecast_duration}: run neural-lam with "
+        f"--ar_steps_eval {ar_steps_for(forecast_duration)} --eval_init_times "
+        "(empty: no init-time filtering)"
+    )
+    return _create_neural_lam_config(
+        artifact,
+        boundary_source,
+        fp_interior_config,
+        fp_boundary_config,
+        workdir,
     )
 
-    # neural-lam's convention is to have the same name for the zarr store
-    # as the config file, but with .zarr extension
-    fp_dataset = fp_inference_datastore_config.replace(".yaml", ".zarr")
-    inference_config.to_yaml_file(fp_inference_datastore_config)
 
-    ds = mdp.create_dataset(config=inference_config, ds_stats=ds_stats)
-    logger.info(f"Writing inference dataset to {fp_dataset}")
-    ds.to_zarr(fp_dataset)
-
-    return fp_inference_datastore_config
+def _parse_analysis_time(s):
+    t = isodate.parse_datetime(s)
+    if t.tzinfo is not None:
+        t = t.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return t
 
 
-def _prepare_all_inference_dataset_zarr(
-    analysis_time: datetime.datetime,
-    forecast_duration: datetime.timedelta,
-    datastore_input_paths: Dict[str, Dict[str, str]],
-    fp_inference_workdir: str,
-    time_dimensions: list[str],
-    rename_variables: Dict[str, Dict[str, str]],
-) -> str:
-    """
-    Prepare the inference dataset.
-
-    Parameters
-    ----------
-    analysis_time : datetime.datetime
-        The analysis time to use for the inference dataset(s).
-    forecast_duration : datetime.timedelta
-        The forecast duration to use for the inference dataset(s).
-    datastore_input_paths : Dict[str, Dict[str,str]]
-        A dictionary of datastore names and their corresponding input names
-        and paths to overwrite in the training config.
-    fp_inference_workdir : str
-        The path to the inference working directory, where the inference
-        datastore config(s) and zarr dataset(s) will be saved.
-    time_dimensions : list[str]
-        The list of time dimensions to replace `time` with, for example
-        replacing `time` with [`analysis_time`, `elapsed_forecast_duration`]
-
-    Returns
-    -------
-    Dict[str, str]
-        A dictionary of datastore names and the path to their corresponding
-        inference datastore config file. The inference dataset is saved as a
-        zarr store in the same directory as the config file, with the same
-        name but with a .zarr extension instead of .yaml.
-    """
-    fps_datastore_configs = {}
-    for datastore_name, input_paths in datastore_input_paths.items():
-        logger.info(f"Processing {datastore_name} datastore for inference")
-        fp_training_datastore_config = _prepare_inference_dataset_zarr(
-            datastore_name=datastore_name,
-            datastore_input_paths=input_paths,
-            fp_inference_workdir=fp_inference_workdir,
-            analysis_time=analysis_time,
-            forecast_duration=forecast_duration,
-            time_dimensions=time_dimensions,
-            rename_variables=rename_variables,
-        )
-
-        fps_datastore_configs[datastore_name] = fp_training_datastore_config
-
-    return fps_datastore_configs
-
-
-def _create_inference_config(
-    fps_inference_datastore_config: Dict[str, str], fp_inference_workdir: str
-) -> str:
-    """
-    Create the inference config file for neural-lam, updating the datastore
-    config paths to point to the inference datastore config files.
-
-    Parameters
-    ----------
-    fps_inference_datastore_config : Dict[str, str]
-        A dictionary of datastore names and the path to their corresponding
-        inference datastore config file.
-    fp_inference_workdir : str
-        The path to the inference working directory, where the inference
-        config file will be saved.
-
-    Returns
-    -------
-    str
-        The path to the inference config file.
-    """
-    training_config = NeuralLAMConfig.from_yaml_file(FP_TRAINING_CONFIG)
-    inference_config = copy.deepcopy(training_config)
-
-    fp_inference_config = f"{fp_inference_workdir}/config.yaml"
-
-    def _set_datastore_config_path(node: DatastoreSelection, fp: str):
-        node.config_path = Path(fp).relative_to(
-            Path(fp_inference_config).parent
-        )
-        # XXX: There is a bug in neural-lam here that means that the datastore kind
-        # doesn't correctly get serialised to a string in the config file when
-        # saved to yaml
-        node.kind = str(node.kind)
-
-    # see if the neural-lam config was for single or multiple datastores
-    if hasattr(training_config, "datastores"):
-        # using multiple datastores
-        for (
-            datastore_name,
-            fp_datastore_config,
-        ) in fps_inference_datastore_config.items():
-            if datastore_name not in inference_config.datastores:
-                raise ValueError(
-                    f"Datastore {datastore_name} not found in training config. "
-                    f"Available datastores are: "
-                    f"{list(inference_config.datastores.keys())}"
-                )
-            _set_datastore_config_path(
-                node=inference_config.datastores[datastore_name],
-                fp=fp_datastore_config,
-            )
-    else:
-        fp_datastore_config = list(fps_inference_datastore_config.values())[0]
-        # using a single datastore
-        _set_datastore_config_path(
-            node=inference_config.datastore, fp=fp_datastore_config
-        )
-
-    inference_config.to_yaml_file(fp_inference_config)
-    logger.info(f"Saved inference config to {fp_inference_config}")
-
-    return fp_inference_config
-
-
-@logger.catch(reraise=True)
 def main():
-    env_vars = _parse_env_vars()
-    # convert analysis time to UTC and strip timezone info
-    analysis_time = (
-        env_vars["ANALYSIS_TIME"]
-        .astimezone(datetime.timezone.utc)
-        .replace(tzinfo=None)
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument(
+        "--artifact", type=Path, default=Path("inference_artifact")
+    )
+    parser.add_argument(
+        "--interior-dir",
+        required=True,
+        type=Path,
+        help="regrid_dini.py output",
+    )
+    parser.add_argument(
+        "--boundary",
+        required=True,
+        help="boundary forecast zarr (IFS contract)",
+    )
+    parser.add_argument(
+        "--boundary-source", choices=sorted(BOUNDARY_NAMES), default="dini"
+    )
+    parser.add_argument(
+        "--analysis-time",
+        required=True,
+        type=_parse_analysis_time,
+        help="ISO8601, UTC if no timezone",
+    )
+    parser.add_argument(
+        "--forecast-duration",
+        required=True,
+        type=isodate.parse_duration,
+        help="ISO8601 duration, e.g. PT18H",
+    )
+    parser.add_argument("--workdir", required=True, type=Path)
+    args = parser.parse_args()
 
-    fps_inference_datastore_config = _prepare_all_inference_dataset_zarr(
-        analysis_time=analysis_time,
-        forecast_duration=env_vars["FORECAST_DURATION"],
-        datastore_input_paths=env_vars["DATASTORE_INPUT_PATHS"],
-        fp_inference_workdir=env_vars["INFERENCE_WORKDIR"],
-        time_dimensions=env_vars["TIME_DIMENSIONS"],
-        rename_variables=env_vars["DATASTORE_RENAME_VARIABLES"],
-    )
-    _create_inference_config(
-        fps_inference_datastore_config=fps_inference_datastore_config,
-        fp_inference_workdir=env_vars["INFERENCE_WORKDIR"],
+    create_inference_datasets(
+        artifact=args.artifact,
+        interior_dir=args.interior_dir,
+        boundary=args.boundary,
+        boundary_source=args.boundary_source,
+        analysis_time=args.analysis_time,
+        forecast_duration=args.forecast_duration,
+        workdir=args.workdir,
     )
 
 
 if __name__ == "__main__":
-    with_debugger = os.getenv("MLWM_DEBUGGER", "0")
-    if with_debugger == "ipdb":
+    if os.getenv("MLWM_DEBUGGER", "") == "ipdb":
         import ipdb
 
         with ipdb.launch_ipdb_on_exception():
