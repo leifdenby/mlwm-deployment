@@ -1,11 +1,17 @@
 # Keep the build context small (also used by podman). The image only needs
-# pyproject.toml, *.yaml, entry.sh, src/ and inference_artifact/
+# pyproject.toml, *.yaml, entry.sh, src/ and the assembled package directories
+# in inference-artifact/build/ (LOCAL_ARTIFACT_DIR in build_image.sh)
 .venv/
 inference_workdir/
 dev-data/
 tmp/
 tests/
 dev-utils/
+inference-artifact/*
+!inference-artifact/build/
+inference-artifact/build/*.zip
+inference-artifact/build/*.tmp
+**/*.ckpt.tmp
 .devcontainer/
 **/__pycache__/
 **/.DS_Store

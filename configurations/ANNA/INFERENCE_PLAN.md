@@ -56,7 +56,12 @@ Both used the same `7deg_config.yaml` datastores, so the DANRA interior statisti
 - `check_checkpoint_compat.py` (defaults: 4 levels, no dynamic deltas) passes: strict load of all 561 tensors and a one-step eval.
 
 **Inference package on Zenodo instead of S3 (user decision):** CC-BY-4.0. Creators: K. S. Hintz and L. Denby. The other authors of arXiv:2504.09340 are acknowledged as contributors.
-- The package (configs, statistics, grids, `model.yaml`, no checkpoint; ~6.5 MB) is built by `assemble_artifact.py --zip` and uploaded as a **draft** by `dev-utils/zenodo_draft.py`. The user publishes it.
+- The package (configs, statistics, grids, `model.yaml`, no checkpoint; ~6.5 MB) is built by `assemble_artifact.py --zip` and uploaded as a **draft** by `inference-artifact/zenodo_draft.py`. The user publishes it.
+- **Layout (2026-10-06):** the code and records for building the package live in
+  `configurations/ANNA/inference-artifact/` (scripts, build/check/publish docs in its
+  `README.md`, the README shipped in the package `package-README.md`, provenance tools in
+  `provenance/`). Builds go to `inference-artifact/build/` (gitignored). gefion-1 is recorded
+  there as a prior, incorrect artifact; the package ships no gefion-1 files.
 - The container's `ARTIFACT_SOURCE=zenodo` downloads it (`PACKAGE_URL`, `PACKAGE_MD5`). `src/fetch_checkpoint.py` downloads the checkpoint in every mode. The S3 route and the AWS build credentials are removed.
 
 ## DINI facts (probed on `2026-09-26T180000Z`)
@@ -103,7 +108,7 @@ These configs define exactly which fields, levels, grid and dims each boundary s
 - **Validation:** load each config with the pinned mdp (step 2). For the IFS config, also build a tiny synthetic `ifs.zarr` with the expected variable/dim names, run `mdp.create_dataset`, and check it gives 58 forcing + 2 static features, in the same order as the ERA5 config (feature order must match the checkpoint).
 
 ### 2. Switch neural-lam and mdp to the training lineage (`configurations/ANNA/pyproject.toml`) — DONE
-Status: the gefion-1 checkpoint loads strictly (16,666,855 parameters) with the pinned stack, and a one-step `train_model --eval test` runs end to end and writes finite predictions to zarr. This was checked on synthetic data with `dev-utils/check_checkpoint_compat.py --run-eval`.
+Status: the gefion-1 checkpoint loads strictly (16,666,855 parameters) with the pinned stack, and a one-step `train_model --eval test` runs end to end and writes finite predictions to zarr. This was checked on synthetic data with `inference-artifact/check_checkpoint_compat.py --run-eval`.
 
 Pins (in `configurations/ANNA/pyproject.toml`):
 - **neural-lam** → `joeloskarsson/neural-lam-dev@a44d432e` (`research`, 2025-08-22). It contains the training commit `e58e334c`, the fix after it (`8a38350e`), forecast-format boundary loading (`fb820e2a`, needed for IFS) and the DANRA checkpoint dependency pins (`2feaf91d`). Later `research` commits add git submodule entries without a `.gitmodules` URL, which breaks installing from git, and they only change plotting code in `neural_lam/`. `a44d432e` also adds the paper's `scripts/ifs_download.py` and `scripts/interp_na_ifs.py`, a reference for the IFS converter.
@@ -114,7 +119,7 @@ Pins (in `configurations/ANNA/pyproject.toml`):
 - **dask** floor lowered to `>=2025.3.0` (neural-lam-dev pins `dask~=2025.3.0`, `xarray~=2025.3.1`, `numpy<2`).
 
 Learned while implementing (needed in later steps):
-- **Sanitise the checkpoint** (`dev-utils/sanitize_checkpoint.py`, step 3). `hyper_parameters["datastore_boundary"]` is the pickled training datastore, with lazy zarr v2 arrays pointing at `/dcai`. It can't be unpickled with zarr 3 and is useless anyway, so drop it and keep `args` and `config`.
+- **Sanitise the checkpoint** (`inference-artifact/sanitize_checkpoint.py`, step 3). `hyper_parameters["datastore_boundary"]` is the pickled training datastore, with lazy zarr v2 arrays pointing at `/dcai`. It can't be unpickled with zarr 3 and is useless anyway, so drop it and keep `args` and `config`.
 - **`TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1`** must be set in `entry.sh`. Lightning's `load_from_checkpoint` uses torch's default `weights_only` (True since torch 2.6), and the checkpoint holds `argparse.Namespace`/`NeuralLAMConfig` objects.
 - **`--dynamic_time_deltas`** must be passed to `train_model` (it's a `store_true` flag, and ANNA was trained with it on). Also pass `--num_workers >= 1` (neural-lam-dev uses `persistent_workers`).
 - Use **`WANDB_MODE=offline`** (with `WANDB_DIR` in the workdir), not `wandb disabled`. With wandb disabled, `on_test_epoch_end` crashes saving metric plots into a non-existent run dir. Offline mode sends nothing.
@@ -137,7 +142,7 @@ The status below describes the earlier gefion-1 version.
 
 Status:
 - `src/mlwm/build_inference_artifact.py` now packages `datastore_boundary`, including its stats. It also rewrites **every** datastore `config_path` to the packaged file; the single `datastore` case previously kept absolute `/dcai` paths. Covered by `src/mlwm/tests/test_build_inference_artifact.py`.
-- `dev-utils/assemble_artifact.py --gefion-1-zip … --boundary-stats …` builds `configurations/ANNA/inference_artifact/` (gitignored):
+- `inference-artifact/assemble_artifact.py --gefion-1-zip … --boundary-stats …` builds `configurations/ANNA/inference_artifact/` (gitignored):
   - `checkpoint.pkl`, sanitised
   - `configs/`: the repo configs, plus the originals under `configs/gefion-1/`
   - `configs/era_7deg_model1_config.zarr`, the stats datastore
@@ -154,14 +159,14 @@ Original step description:
 - Fix `_find_datastore_paths` so it includes `datastore_boundary`, and add a test in `src/mlwm/tests/`. That way a future re-build on Gefion is complete.
 - Assemble a local artifact directory `configurations/ANNA/inference_artifact/` (gitignored) from `gefion-1.zip` plus:
   - the step 1 configs (`configs/era_7deg_model1_config.yaml`, `ifs_…`, `dini_…`, and the neural-lam config variants)
-  - the checkpoint, sanitised with `dev-utils/sanitize_checkpoint.py` (see step 2)
+  - the checkpoint, sanitised with `inference-artifact/sanitize_checkpoint.py` (see step 2)
   - `stats/era_7deg_model1_config.stats.zarr` and `grids/era_7deg_model1_config.grid.zarr` (boundary lat/lon)
 - **ERA5 stats datastore zarr.** `overload_stats_path` makes neural-lam open `era_7deg_model1_config.zarr` next to the configs. It must contain at least `splits` (train/val/test), the `forcing_feature`/`static_feature` coordinates, and `{forcing,static}__train__{mean,std}` plus `forcing__train__diff_{mean,std}`. The zarr must be newer than the config, or neural-lam logs a warning. If it's missing, neural-lam tries to build the full 2000–2020 ERA5 dataset.
 - **Checked Kasper's `ablation-studies.tgz`** (a local copy of the ablation-studies directory):
   - Its `configs/{danra_model1,era_7deg_model1}_config.zarr` are **2-day test datastores** (2010-01-01..03, one-day "train" split, zarr v3). Their stats are *not* the training stats: the interior ones differ from the gefion-1 artifact stats, e.g. mslp mean 100,647 vs 101,308 Pa. Don't use them.
   - `era_subset/era_danra_model1_subset.zarr` also covers only 2010-01-01..03. It does have the exact training ERA5 grid, 187 lat × 267 lon at 0.25° (lat 79.25–32.75, lon 0–359.75 wrapping around Greenwich).
   - With that grid and the `grid_index` values kept in the checkpoint's pickled boundary datastore (stacked `[longitude, latitude]`), the **exact 18014 boundary points are recovered**: lat 40.50–71.50, lon −26.25–39.50. That's the boundary lat/lon part of this step done.
-- **Boundary stats: recompute from WeatherBench2** (the Gefion training datastore is no longer accessible) with `dev-utils/compute_era5_boundary_stats.py`, to be run on a server with good bandwidth to GCS.
+- **Boundary stats: recompute from WeatherBench2** (the Gefion training datastore is no longer accessible) with `inference-artifact/compute_era5_boundary_stats.py`, to be run on a server with good bandwidth to GCS.
   - It replicates the training mdp (`sadamov@dd9af481`) exactly: stats are computed **before cropping**, i.e. over the whole ERA5 subset box (187 × 267 points), and **`diff_std` is the std of second differences**, because `calc_stats()` overwrites `ds` when applying `diff_` ops.
   - It streams restartable blocks with float64 (count, mean, M2) accumulators.
   - Validated two ways:
@@ -170,7 +175,7 @@ Original step description:
   - Cost: WB2 has one global chunk per time step, so there are about 345 MB of reads per step, about 9 TB for the full split (about 27,500 steps). `--block-stride N` gives approximate stats from every N-th block. Fallback `src/mlwm/recompute_boundary_stats.py`:
   - Run mdp on WB2 ERA5 with the recovered config over the train split (2000-01-01..2018-10-29, 6-hourly).
   - Assert 18014 grid points.
-- Add a small script (e.g. `configurations/ANNA/dev-utils/assemble_artifact.sh`) that downloads `gefion-1.zip` and adds the extra files, so the directory can be reproduced.
+- Add a small script (e.g. `configurations/ANNA/inference-artifact/assemble_artifact.sh`) that downloads `gefion-1.zip` and adds the extra files, so the directory can be reproduced.
 - `Containerfile`: add `ARG ARTIFACT_SOURCE=local`. When `local`, `COPY inference_artifact/` into the image instead of the S3 download. Keep the S3 path for later, when the completed artifact is uploaded (e.g. as `gefion-2.zip`).
 
 ### 4. `src/regrid_dini.py` (new, runs before `create_inference_dataset.py`)

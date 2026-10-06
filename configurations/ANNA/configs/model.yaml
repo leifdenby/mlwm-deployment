@@ -3,7 +3,7 @@
 # Settings" (Adamov et al. 2025, arXiv:2504.09340), published on Zenodo.
 #
 # Read by entry.sh (graph, train_model arguments, checkpoint) and by the
-# Containerfile / dev-utils/assemble_artifact.py (checkpoint download).
+# Containerfile / inference-artifact/assemble_artifact.py (checkpoint download).
 
 checkpoint:
   # CC-BY-4.0, by Simon Adamov, Joel Oskarsson and Kasper Stener Hintz

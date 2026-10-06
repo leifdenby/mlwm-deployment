@@ -1,7 +1,7 @@
 # neural-lam config the DANRA ML LAM models (arXiv:2504.09340) were trained with: DANRA interior, ERA5
 # boundary.
 #
-# Identical to `configs/7deg_config.yaml` in the gefion-1 inference artifact
+# Identical to `configs/7deg_config.yaml` in the (superseded) gefion-1 inference artifact
 # (and to `scripts/danra_model_config_era5.yaml` on the `research` branch of
 # https://github.com/joeloskarsson/neural-lam-dev) except that the datastore
 # config paths are relative to this file (as neural-lam resolves them).

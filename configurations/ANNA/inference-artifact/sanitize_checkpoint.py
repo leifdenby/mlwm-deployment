@@ -10,6 +10,11 @@ inference, as `train_model --eval` passes the inference datastores to
 `load_from_checkpoint`, so it is dropped here. Model weights, `args` and
 `config` are kept unchanged.
 
+Only needed for the (superseded) gefion-1 checkpoint, see README.md. The
+paper's DANRA checkpoint has no pickled hyper-parameters.
+`assemble_artifact.py` uses `load_checkpoint` to read the boundary grid from
+the gefion-1 checkpoint's pickled datastore.
+
 Usage:
     python sanitize_checkpoint.py <checkpoint_in> <checkpoint_out>
 """

@@ -2,9 +2,10 @@
 # Run an ANNA forecast (the DANRA ML LAM model of arXiv:2504.09340, see
 # configs/model.yaml) from a DINI control forecast.
 #
-# Intended to be run in the container, where the inference artifact (assembled
-# with dev-utils/assemble_artifact.py) is in ./inference_artifact. It can also
-# be run outside the container in the ANNA uv environment.
+# Intended to be run in the container, where the inference artifact (see
+# inference-artifact/README.md) is in ./inference_artifact. It can also be run
+# outside the container in the ANNA uv environment, with
+# INFERENCE_ARTIFACT_PATH=inference-artifact/build/<artifact-name>.
 #
 # Steps (see INFERENCE_PLAN.md):
 #   1. regrid DINI to the DANRA grid (interior) and, for the DINI boundary,

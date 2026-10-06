@@ -22,8 +22,9 @@ RUN uv pip install --break-system-packages --system --constraints constraints.tx
 RUN python -c 'import neural_lam; print(f"neural-lam=={neural_lam.__version__}")'
 
 # The inference artifact (configs, statistics, grids, model description, see
-# dev-utils/assemble_artifact.py) comes from:
-# - "local": the directory `inference_artifact/` in the build context
+# inference-artifact/README.md) comes from:
+# - "local": the assembled package directory ${LOCAL_ARTIFACT_DIR} in the
+#   build context
 # - "zenodo": the published inference package ${PACKAGE_URL}, checked against
 #   ${PACKAGE_MD5}
 # The model checkpoint is then downloaded (md5-checked) from Zenodo as given in
@@ -31,9 +32,10 @@ RUN python -c 'import neural_lam; print(f"neural-lam=={neural_lam.__version__}")
 ARG ARTIFACT_SOURCE="local"
 ARG PACKAGE_URL=""
 ARG PACKAGE_MD5=""
-# `inference_artifact/` must exist in the build context (build_image.sh
+ARG LOCAL_ARTIFACT_DIR="inference-artifact/build/anna-local"
+# ${LOCAL_ARTIFACT_DIR} must exist in the build context (build_image.sh
 # creates an empty one when ARTIFACT_SOURCE=zenodo)
-COPY inference_artifact/ /workspace/inference_artifact_local/
+COPY ${LOCAL_ARTIFACT_DIR}/ /workspace/inference_artifact_local/
 RUN if [ "$ARTIFACT_SOURCE" = "local" ] ; then \
         mv /workspace/inference_artifact_local /workspace/inference_artifact ; \
     elif [ "$ARTIFACT_SOURCE" = "zenodo" ] ; then \

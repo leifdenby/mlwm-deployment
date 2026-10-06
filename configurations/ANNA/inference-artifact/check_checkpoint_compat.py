@@ -21,10 +21,13 @@ Defaults are for the paper's DANRA model (Zenodo 15131838: graph
 The data is random noise, so this only checks that the software stack and
 checkpoint fit together, not forecast skill.
 
-The gefion-1 checkpoint should first be cleaned with `sanitize_checkpoint.py`.
+The (superseded) gefion-1 checkpoint should first be cleaned with
+`sanitize_checkpoint.py`.
 
-Usage (in the ANNA environment):
-    python check_checkpoint_compat.py <checkpoint> <configs_dir> <workdir> [--run-eval]
+Usage (from the repository root), e.g. for an assembled package:
+    uv run --project configurations/ANNA python \\
+        configurations/ANNA/inference-artifact/check_checkpoint_compat.py \\
+        <package>/danra_model.ckpt <package>/configs <workdir> --run-eval
 """
 import argparse
 import os

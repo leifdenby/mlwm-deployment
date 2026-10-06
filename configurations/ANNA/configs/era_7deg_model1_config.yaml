@@ -5,10 +5,12 @@
 # the IFS and DINI boundary datastores are normalised with (via
 # `overload_stats_path` in the neural-lam configs `7deg_config_{ifs,dini}.yaml`).
 #
-# Provenance: the gefion-1 artifact does not include this file. It was
-# reconstructed from the `MDPDatastore` pickled in the gefion-1 checkpoint
-# (original path on Gefion:
-# /dcai/projects/cu_0003/user_space/hinkas/git-repos/ablation-studies/configs/era_forcing/era_7deg_model1_config.yaml)
+# Provenance: the (superseded) gefion-1 artifact does not include this file.
+# It was reconstructed from the `MDPDatastore` pickled in the gefion-1
+# checkpoint (trained on the same datastores as the paper's model, see
+# inference-artifact/README.md; the original file was
+# `configs/era_forcing/era_7deg_model1_config.yaml` of the ablation-studies
+# repository on the Gefion project storage)
 # and matches `scripts/danra_era5_config.yaml` on the `research` branch of
 # https://github.com/joeloskarsson/neural-lam-dev field for field.
 #

@@ -1,9 +1,9 @@
 # Interior (DANRA) datastore config the DANRA ML LAM models (arXiv:2504.09340) were trained with.
 #
-# Identical to `configs/danra_model1_config.yaml` in the gefion-1 inference
-# artifact, except that the `/dcai/projects/cu_0003/data/sources/danra/v0.5.0/`
-# paths have been replaced with the public copy of the same DANRA v0.5.0
-# dataset. At inference time the input paths are overridden (see
+# Identical to the training config (as shipped in the superseded gefion-1
+# inference artifact, see inference-artifact/README.md), except that the
+# paths to DANRA v0.5.0 on the Gefion project storage have been replaced with
+# the public copy of the same dataset. At inference time the input paths are overridden (see
 # `src/create_inference_dataset.py`), this config also serves as the
 # `interior_dataset_config_path` reference for the boundary datastores'
 # `domain_cropping`.

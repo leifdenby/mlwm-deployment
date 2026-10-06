@@ -12,11 +12,11 @@ The Zenodo personal access token (scope `deposit:write`) is read from the
 
 Usage:
     # review the metadata without contacting Zenodo
-    python zenodo_draft.py --zip anna-danra-2026-10-06.zip --dry-run
+    python zenodo_draft.py --zip build/anna-danra-2026-10-06.zip --dry-run
     # rehearse on sandbox.zenodo.org (needs a sandbox token)
     ZENODO_TOKEN=... python zenodo_draft.py --zip ... --sandbox
     # create the draft on zenodo.org
-    ZENODO_TOKEN=... python zenodo_draft.py --zip anna-danra-2026-10-06.zip
+    ZENODO_TOKEN=... python zenodo_draft.py --zip build/anna-danra-2026-10-06.zip
     # update an existing draft (replace the file, update the metadata)
     ZENODO_TOKEN=... python zenodo_draft.py --zip ... --deposition-id 1234567
 """
@@ -114,6 +114,7 @@ steps, {stats_attrs.get('split_start')} to {stats_attrs.get('split_end')},
 the mllam-data-prep version used for training.</li>
 <li><code>grids/</code>: the DANRA grid and static fields (from DANRA v0.5.0), and
 the 18014 ERA5 boundary grid points the model was trained with.</li>
+<li><code>README.md</code>: description of the package and how to use it.</li>
 <li><code>artifact.yaml</code>: provenance of the package.</li>
 </ul>
 

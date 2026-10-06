@@ -9,6 +9,7 @@ training_cli_args.yaml
 inference_artifact.zip
 inference_artifact/
 inference_artifact.*/
+configurations/ANNA/inference-artifact/build/
 # local development data (e.g. regridded DINI forecasts kept beyond the S3
 # retention period)
 dev-data/

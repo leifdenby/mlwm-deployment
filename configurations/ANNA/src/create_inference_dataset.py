@@ -3,7 +3,7 @@ Create the inference datastores and neural-lam config for running ANNA
 from regridded DINI (interior) and DINI or IFS (boundary) data.
 
 Inputs:
-- the inference artifact (`dev-utils/assemble_artifact.py`), providing the
+- the inference artifact (`inference-artifact/assemble_artifact.py`), providing the
   datastore configs, the neural-lam configs and the training statistics
 - the regridded interior (`interior_{single,pressure}_levels.zarr` from
   `regrid_dini.py`)

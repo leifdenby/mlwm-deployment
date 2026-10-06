@@ -27,10 +27,11 @@ recipe, neural-lam arguments), which `entry.sh` and the container build read.
 - Run without `--dynamic_time_deltas`: the model was trained before that flag
   existed, and leaving it off reproduces its behaviour
 
-An earlier candidate, `gefion-1` (an unpublished ablation run: graph
-`7deg_rect_hi3`, trained with `--dynamic_time_deltas`), was used while
-developing this deployment. It was trained on the same datastores, so its
-artifact provides the training statistics and grids. See INFERENCE_PLAN.md.
+An earlier artifact, `gefion-1`, held an unpublished ablation run (graph
+`7deg_rect_hi3`, trained with `--dynamic_time_deltas`), not the paper's model.
+It was trained on the same datastores, so it still supplies the training
+statistics and grids. See
+[inference-artifact/README.md](inference-artifact/README.md#gefion-1-a-prior-incorrect-inference-artifact).
 
 ## Software
 
@@ -60,34 +61,19 @@ All in [configs/](configs/):
 
 ## Inference package
 
-Everything needed to run the model except its checkpoint, in
-`inference_artifact/` (gitignored):
-
+Everything needed to run the model except its checkpoint is in the inference
+package:
 - the configs above;
-- the training statistics of the DANRA interior and the ERA5 boundary
-  datastores. The ERA5 boundary statistics were recomputed exactly from
-  WeatherBench2 ERA5 with `dev-utils/compute_era5_boundary_stats.py`, since
-  they had never been exported from the training datastore;
-- the DANRA grid and statics, and the 18,014 boundary grid points the model
-  was trained with.
+- the training statistics of the DANRA interior and ERA5 boundary datastores,
+  with the ERA5 statistics recomputed exactly;
+- the DANRA grid and the boundary grid points.
 
-The package is published on Zenodo (record to be added once published) and
-used by the container build (`ARTIFACT_SOURCE=zenodo`). To assemble it
-locally, including the checkpoint, run this from the repository root (it takes
-the DANRA statistics from `gefion-1.zip`):
-
-```bash
-aws s3 cp s3://mlwm-artifacts/inference-artifacts/gefion-1.zip .
-uv run --project configurations/ANNA \
-    python configurations/ANNA/dev-utils/assemble_artifact.py \
-    --gefion-1-zip gefion-1.zip \
-    --boundary-stats era_7deg_model1_config.stats.zarr \
-    --fetch-checkpoint
-```
-
-Use `--artifact-name <name> --zip <name>.zip` to package a new version, and
-`dev-utils/zenodo_draft.py` to upload it as a Zenodo draft (published by hand
-after review).
+It is published on Zenodo (record to be added once published). How it is built,
+checked and published, and its provenance (including the superseded
+`gefion-1` artifact), are in
+[inference-artifact/README.md](inference-artifact/README.md). The README
+shipped inside the package is
+[inference-artifact/package-README.md](inference-artifact/package-README.md).
 
 ## Building the image
 
@@ -95,7 +81,8 @@ after review).
 CONTAINER_APP=podman ./build_image.sh
 ```
 
-- `ARTIFACT_SOURCE=local` (default) uses the assembled `inference_artifact/`.
+- `ARTIFACT_SOURCE=local` (default) uses an assembled package directory,
+  `LOCAL_ARTIFACT_DIR` (default `inference-artifact/build/anna-local`).
 - `ARTIFACT_SOURCE=zenodo` downloads the published package (`PACKAGE_URL`,
   `PACKAGE_MD5`).
 
@@ -125,14 +112,15 @@ It's configured through environment variables:
 | `DINI_ROOT` | `s3://harmonie-zarr/dini/control/{analysis}/` | DINI forecast zarrs |
 | `IFS_BOUNDARY_PATH` | | IFS forecast zarr, required for `BOUNDARY_SOURCE=ifs` |
 | `INFERENCE_WORKDIR` | `./inference_workdir` | |
-| `INFERENCE_ARTIFACT_PATH` | `./inference_artifact` | |
+| `INFERENCE_ARTIFACT_PATH` | `./inference_artifact` | the package (with checkpoint); outside the container e.g. `inference-artifact/build/<name>` |
 | `MLWM_DEBUGGER` | | `ipdb` to debug the python steps on exceptions |
 
 Outside the container, run it from `configurations/ANNA` in the uv
 environment, with AWS credentials for reading DINI (e.g. `AWS_PROFILE`):
 
 ```bash
-ANALYSIS_TIME=2026-10-01T00:00Z FORECAST_DURATION=PT18H ./entry.sh
+INFERENCE_ARTIFACT_PATH=inference-artifact/build/anna-local \
+    ANALYSIS_TIME=2026-10-01T00:00Z FORECAST_DURATION=PT18H ./entry.sh
 ```
 
 In the container: `run_inference_container.sh` still has the interface from
@@ -166,14 +154,10 @@ T+3 h. The conventions are DANRA's:
 
 ## Development
 
-- [dev-utils/](dev-utils/):
-  - `assemble_artifact.py`: build `inference_artifact/` and the package zip
-  - `zenodo_draft.py`: upload the package zip as a Zenodo draft
-  - `compute_era5_boundary_stats.py`: exact ERA5 boundary training statistics
-  - `check_checkpoint_compat.py`: strict checkpoint load and one-step forecast
-    on synthetic data (`--graph-levels 3 --dynamic-time-deltas` for gefion-1)
-  - `sanitize_checkpoint.py`: make the gefion-1 checkpoint loadable
-  - `plot_boundary_coverage.py`: the boundary coverage map above
+- [inference-artifact/](inference-artifact/): building, checking and
+  publishing the inference package
+- [dev-utils/](dev-utils/)`plot_boundary_coverage.py`: the boundary coverage
+  map above
 - Tests:
   ```bash
   uv run --project configurations/ANNA --with pytest \

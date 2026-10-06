@@ -1,6 +1,6 @@
 """
-Recompute the ERA5 boundary training statistics of ANNA (gefion-1) from
-WeatherBench2 ERA5.
+Recompute the ERA5 boundary training statistics of the DANRA ML LAM models
+(arXiv:2504.09340, the model ANNA runs) from WeatherBench2 ERA5.
 
 The statistics ANNA's boundary was normalised with (`forcing__train__*` and
 `static__train__*` of the `era_7deg_model1_config` datastore) were never
@@ -51,7 +51,7 @@ artifact (`stats/{datastore_name}.stats.zarr`).
 Example (full, exact computation):
 
     uv run --project configurations/ANNA --with gcsfs \\
-        python configurations/ANNA/dev-utils/compute_era5_boundary_stats.py \\
+        python configurations/ANNA/inference-artifact/compute_era5_boundary_stats.py \\
         --output era_7deg_model1_config.stats.zarr \\
         --partials-dir era5_stats_partials
 
@@ -460,7 +460,7 @@ def main():
             "(era_7deg_model1_config) of the DANRA ML LAM models "
             "(arXiv:2504.09340), recomputed "
             "from WeatherBench2 ERA5 over the era_danra_model1_subset box with "
-            "configurations/ANNA/dev-utils/compute_era5_boundary_stats.py"
+            "configurations/ANNA/inference-artifact/compute_era5_boundary_stats.py"
         ),
         source=args.source,
         split=SPLIT_NAME,
