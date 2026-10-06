@@ -59,19 +59,51 @@ All in [configs/](configs/):
 | `dini_7deg_model1_config.yaml` | DINI boundary, in the same layout as IFS |
 | `7deg_config_{era5,ifs,dini}.yaml` | neural-lam configs; IFS and DINI are normalised with the ERA5 training statistics (`overload_stats_path`) |
 
-## Inference package
+## Inference artifact
 
-Everything needed to run the model except its checkpoint is in the inference
-package:
-- the configs above;
-- the training statistics of the DANRA interior and ERA5 boundary datastores,
-  with the ERA5 statistics recomputed exactly;
-- the DANRA grid and the boundary grid points.
+In mlwm-deployment, an **inference artifact** is a directory (shipped as a
+zip) that holds everything needed to run a trained model's forecasts, apart
+from the input data and the software. See the
+[repository README](../../README.md). It normally has:
+- the model checkpoint (weights);
+- the configs the model was trained with (neural-lam and mllam-data-prep
+  datastore configs) and its training arguments;
+- the training dataset statistics, which inputs are normalised with and
+  outputs de-normalised with.
 
-It is published on Zenodo (record to be added once published). How it is built,
-checked and published, and its provenance (including the superseded
-`gefion-1` artifact), are in
-[inference-artifact/README.md](inference-artifact/README.md). The README
+Without the artifact, the checkpoint alone can't be run. The model expects
+its inputs in a particular feature order and normalisation, and on a
+particular grid and graph, and these only follow from the configs and
+statistics it was trained with.
+
+Usually the artifact is built with `mlwm.build_inference_artifact` on the
+machine the model was trained on. ANNA's had to be reconstructed after the
+fact: the boundary configs, statistics and grid were missing (see
+[inference-artifact/README.md](inference-artifact/README.md)). ANNA's
+artifact has:
+
+| Path | What |
+|---|---|
+| `configs/` | the configs above, including `model.yaml` |
+| `configs/era_7deg_model1_config.zarr` | the ERA5 boundary statistics in the form neural-lam reads them (`overload_stats_path`) |
+| `stats/` | training statistics of the DANRA interior and the ERA5 boundary datastores (the ERA5 ones recomputed exactly) |
+| `grids/` | the DANRA grid and statics (target grid for regridding DINI) and the 18,014 ERA5 boundary points the model was trained with |
+| `artifact.yaml`, `README.md` | provenance and description |
+| `danra_model.ckpt` | the checkpoint |
+
+The checkpoint is already public (Zenodo 15131838), so it isn't re-published.
+The artifact is therefore published **without the checkpoint**, as the
+*inference package* zip on Zenodo (record to be added once published).
+
+The container build puts the two back together:
+- it fetches the package, or uses a locally built one;
+- it downloads the checkpoint into it (md5-checked);
+- the result is the complete artifact at `/workspace/inference_artifact`,
+  which `entry.sh` reads (`INFERENCE_ARTIFACT_PATH`).
+
+How the artifact is built, checked and published, and its provenance, are in
+[inference-artifact/README.md](inference-artifact/README.md). That includes
+the superseded `gefion-1` artifact, which held a different model. The README
 shipped inside the package is
 [inference-artifact/package-README.md](inference-artifact/package-README.md).
 
@@ -81,7 +113,7 @@ shipped inside the package is
 CONTAINER_APP=podman ./build_image.sh
 ```
 
-- `ARTIFACT_SOURCE=local` (default) uses an assembled package directory,
+- `ARTIFACT_SOURCE=local` (default) uses a locally built artifact directory,
   `LOCAL_ARTIFACT_DIR` (default `inference-artifact/build/anna-local`).
 - `ARTIFACT_SOURCE=zenodo` downloads the published package (`PACKAGE_URL`,
   `PACKAGE_MD5`).
@@ -112,7 +144,7 @@ It's configured through environment variables:
 | `DINI_ROOT` | `s3://harmonie-zarr/dini/control/{analysis}/` | DINI forecast zarrs |
 | `IFS_BOUNDARY_PATH` | | IFS forecast zarr, required for `BOUNDARY_SOURCE=ifs` |
 | `INFERENCE_WORKDIR` | `./inference_workdir` | |
-| `INFERENCE_ARTIFACT_PATH` | `./inference_artifact` | the package (with checkpoint); outside the container e.g. `inference-artifact/build/<name>` |
+| `INFERENCE_ARTIFACT_PATH` | `./inference_artifact` | the inference artifact (with checkpoint); outside the container e.g. `inference-artifact/build/<name>` |
 | `MLWM_DEBUGGER` | | `ipdb` to debug the python steps on exceptions |
 
 Outside the container, run it from `configurations/ANNA` in the uv
@@ -155,7 +187,7 @@ T+3 h. The conventions are DANRA's:
 ## Development
 
 - [inference-artifact/](inference-artifact/): building, checking and
-  publishing the inference package
+  publishing the inference artifact
 - [dev-utils/](dev-utils/)`plot_boundary_coverage.py`: the boundary coverage
   map above
 - Tests:
