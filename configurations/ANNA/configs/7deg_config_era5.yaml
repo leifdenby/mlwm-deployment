@@ -1,4 +1,4 @@
-# neural-lam config ANNA (gefion-1) was trained with: DANRA interior, ERA5
+# neural-lam config the DANRA ML LAM models (arXiv:2504.09340) were trained with: DANRA interior, ERA5
 # boundary.
 #
 # Identical to `configs/7deg_config.yaml` in the gefion-1 inference artifact

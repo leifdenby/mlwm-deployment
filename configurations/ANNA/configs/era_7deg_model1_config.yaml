@@ -1,4 +1,4 @@
-# Boundary (ERA5) datastore config ANNA (gefion-1) was trained with.
+# Boundary (ERA5) datastore config the DANRA ML LAM models (arXiv:2504.09340) were trained with.
 #
 # This config is the *reference* for the boundary: it defines the forcing
 # feature order the checkpoint expects and the ERA5 training statistics that

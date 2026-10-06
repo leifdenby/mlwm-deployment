@@ -1,0 +1,59 @@
+# The model ANNA runs: the DANRA ML LAM model from "Building Machine Learning
+# Limited Area Models: Kilometer-Scale Weather Forecasting in Realistic
+# Settings" (Adamov et al. 2025, arXiv:2504.09340), published on Zenodo.
+#
+# Read by entry.sh (graph, train_model arguments, checkpoint) and by the
+# Containerfile / dev-utils/assemble_artifact.py (checkpoint download).
+
+checkpoint:
+  # CC-BY-4.0, by Simon Adamov, Joel Oskarsson and Kasper Stener Hintz
+  zenodo_record: 15131838
+  doi: 10.5281/zenodo.15131838
+  url: https://zenodo.org/records/15131838/files/danra_model.ckpt?download=1
+  md5: 9b2eaa42fcb0965e450ff27addf9138d
+  # where the checkpoint is put in the inference artifact directory
+  artifact_path: danra_model.ckpt
+
+training:
+  # wandb run of the checkpoint (fine-tune with 4-step rollouts, 3 epochs)
+  wandb_run: jo-research-team/neural_lam/hfzfhiha
+  run_name: train-hi_lam-2x300-02_17_19-2867
+  finetuned_from: train-hi_lam-2x300-02_13_14-1703
+  neural_lam_dev_commit: e7d11c9a9b10d0165314d00f230243addd79d9fb
+  datastore_config: 7deg_config.yaml (DANRA interior + ERA5 7.19 deg boundary)
+
+graph:
+  name: 7deg_rect_hi4
+  # as `rect_hi4` in neural-lam-dev scripts/danra_build_graphs.sh
+  build_args:
+    - --mesh_node_distance
+    - "12500"
+    - --archetype
+    - hierarchical
+    - --max_num_levels
+    - "4"
+
+# neural_lam.train_model arguments describing the model (as in training).
+# NB: no --dynamic_time_deltas: the model was trained (e7d11c9) before the
+# flag existed, and leaving it off reproduces that behaviour (boundary time
+# deltas relative to the boundary time steps). The paper's
+# scripts/danra_eval.sh doesn't use it either.
+train_model_args:
+  - --model
+  - hi_lam
+  - --hidden_dim
+  - "300"
+  - --hidden_dim_grid
+  - "150"
+  - --time_delta_enc_dim
+  - "32"
+  - --processor_layers
+  - "2"
+  - --num_past_forcing_steps
+  - "1"
+  - --num_future_forcing_steps
+  - "1"
+  - --num_past_boundary_steps
+  - "1"
+  - --num_future_boundary_steps
+  - "1"

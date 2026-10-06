@@ -1,4 +1,4 @@
-# Interior (DANRA) datastore config ANNA (gefion-1) was trained with.
+# Interior (DANRA) datastore config the DANRA ML LAM models (arXiv:2504.09340) were trained with.
 #
 # Identical to `configs/danra_model1_config.yaml` in the gefion-1 inference
 # artifact, except that the `/dcai/projects/cu_0003/data/sources/danra/v0.5.0/`

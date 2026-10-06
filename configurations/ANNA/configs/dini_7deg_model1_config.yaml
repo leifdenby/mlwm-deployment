@@ -1,4 +1,4 @@
-# Boundary datastore config for running ANNA (gefion-1) with DINI on the
+# Boundary datastore config for running the DANRA ML LAM model (arXiv:2504.09340) with DINI on the
 # boundary.
 #
 # `src/regrid_dini.py` interpolates a DINI control forecast onto a regular

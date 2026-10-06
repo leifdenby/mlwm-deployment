@@ -37,6 +37,28 @@ It has **no boundary datastore config or stats**, because `_find_datastore_paths
   - `research` requires `sadamov/mllam-data-prep@building-ml-lams` (`latlon-domain-crop` extra), while `create_inference_dataset.py` used `leifdenby/mllam-data-prep@feat/inference-cli-args`.
 - **Still missing:** the boundary train stats and the exact 18014 boundary lat/lon. Both are only on Gefion (`/dcai/projects/cu_0003/data/sources/era5/era_danra_model1_subset.zarr`), but both can be reproduced from WB2 ERA5, the DANRA grid and the config above.
 
+## Model switch: the paper's DANRA model (2026-10-06)
+The paper's published DANRA checkpoint (Zenodo [15131838](https://zenodo.org/records/15131838), `danra_model.ckpt`, CC-BY-4.0, by Adamov, Oskarsson and Hintz) turned out to be **a different model from gefion-1**. This was found by comparing the two checkpoints:
+
+| | gefion-1 | paper model (`danra_model.ckpt`) |
+|---|---|---|
+| run | `train-hi_lam-2x300-02_27_15-4034` (wandb `n0o7jw5f`) | `train-hi_lam-2x300-02_17_19-2867` (wandb `hfzfhiha`), from the checkpoint's `ModelCheckpoint` callback paths |
+| training | 80 epochs from scratch, 1-step rollouts, `e58e334c` | 3-epoch fine-tune of `train-hi_lam-2x300-02_13_14-1703` with 4-step rollouts, `e7d11c9` |
+| graph | `7deg_rect_hi3` (417 tensors) | **`7deg_rect_hi4`** (561 tensors) |
+| `--dynamic_time_deltas` | on | **off** (the flag didn't exist yet; off reproduces the old behaviour for ERA5 analysis boundaries, and the paper's `scripts/danra_eval.sh` doesn't use it) |
+| checkpoint | full, incl. pickled datastores | `hyper_parameters` stripped; loads with torch's default `weights_only=True` |
+| weights | | unrelated to gefion-1 (relative differences > 100%) |
+
+Both used the same `7deg_config.yaml` datastores, so the DANRA interior statistics, the ERA5 boundary statistics and the 18,014 boundary points are the same.
+
+**Decision (user):** deploy the paper's model. It was evaluated in the paper and is already public. The weights aren't re-published; the deployment downloads them from 15131838.
+- `configs/model.yaml` describes the model (checkpoint URL and md5, graph recipe, `train_model` arguments). `entry.sh` and the container build read it.
+- `check_checkpoint_compat.py` (defaults: 4 levels, no dynamic deltas) passes: strict load of all 561 tensors and a one-step eval.
+
+**Inference package on Zenodo instead of S3 (user decision):** CC-BY-4.0. Creators: K. S. Hintz and L. Denby. The other authors of arXiv:2504.09340 are acknowledged as contributors.
+- The package (configs, statistics, grids, `model.yaml`, no checkpoint; ~6.5 MB) is built by `assemble_artifact.py --zip` and uploaded as a **draft** by `dev-utils/zenodo_draft.py`. The user publishes it.
+- The container's `ARTIFACT_SOURCE=zenodo` downloads it (`PACKAGE_URL`, `PACKAGE_MD5`). `src/fetch_checkpoint.py` downloads the checkpoint in every mode. The S3 route and the AWS build credentials are removed.
+
 ## DINI facts (probed on `2026-09-26T180000Z`)
 - 2 km Lambert, 1906×1606, hourly T+0..T+36, lat 37.7–69.9°N.
 - `single_levels`: has every interior surface state variable (`pres_seasurface t2m u10m v10m pres0m lwavr0m swavr0m`), plus `lsm` and `orography`.
@@ -105,7 +127,14 @@ Original step description:
 - `neural-lam` → `joeloskarsson/neural-lam-dev@research`, pinned to a sha that includes `e7d11c9`.
 - `mllam-data-prep` → a branch with both `domain_cropping` (sadamov `building-ml-lams`) and the inference CLI args (leifdenby `feat/inference-cli-args`). Check whether they can be merged, or whether one branch already has both. **This is the riskiest dependency step.** Step 1's configs can be written in parallel, but their validation needs this step.
 
-### 3. Complete the artifact locally (no upload for now) — DONE (with placeholder boundary stats)
+### 3. Complete the artifact locally (no upload for now) — DONE
+**Update 2026-10-06:**
+- The exact ERA5 boundary statistics from the server run are in place: 688/688 blocks, all checks passed. The 3-day placeholder had been up to about 1 std off in the means, e.g. at 100 hPa.
+- The artifact is now the **inference package for the paper's model** (see "Model switch" above): no checkpoint, plus `model.yaml`.
+- It's published on Zenodo instead of S3; the Containerfile has `ARTIFACT_SOURCE=local|zenodo`.
+
+The status below describes the earlier gefion-1 version.
+
 Status:
 - `src/mlwm/build_inference_artifact.py` now packages `datastore_boundary`, including its stats. It also rewrites **every** datastore `config_path` to the packaged file; the single `datastore` case previously kept absolute `/dcai` paths. Covered by `src/mlwm/tests/test_build_inference_artifact.py`.
 - `dev-utils/assemble_artifact.py --gefion-1-zip … --boundary-stats …` builds `configurations/ANNA/inference_artifact/` (gitignored):

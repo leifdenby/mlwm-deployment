@@ -1,4 +1,4 @@
-# Boundary datastore config for running ANNA (gefion-1) with operational IFS
+# Boundary datastore config for running the DANRA ML LAM model (arXiv:2504.09340) with operational IFS
 # forecasts on the boundary.
 #
 # Adapted from `scripts/danra_ifs_config.yaml` on the `research` branch of

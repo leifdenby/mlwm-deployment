@@ -5,16 +5,23 @@ checkpoint.
 Small synthetic datasets with the variable names ANNA expects are created, an
 interior on a DANRA-like Lambert grid (~1000 km at 5 km spacing) and an ERA5
 layout boundary (0.25 deg), and run through the configs in `configs/` to
-create the interior and boundary datastores. A `7deg_rect_hi3` graph is then
-built with the recipe from neural-lam-dev `scripts/danra_build_graphs.sh` and
-the checkpoint is loaded strictly with `HiLAM.load_from_checkpoint(...)`, the
-same code path `train_model --eval` uses. With `--run-eval` a one-step
-`train_model --eval test` is also run, writing predictions to zarr.
+create the interior and boundary datastores. A `7deg_rect_hi{levels}` graph
+is then built with the recipe from neural-lam-dev
+`scripts/danra_build_graphs.sh`. If the checkpoint stores its training
+arguments it is loaded strictly with `HiLAM.load_from_checkpoint(...)`, the
+same code path `train_model --eval` uses. With `--run-eval` (implied for
+checkpoints without stored arguments, e.g. the paper's DANRA checkpoint) a
+one-step `train_model --eval test` is run, which also loads the checkpoint
+strictly, writing predictions to zarr.
+
+Defaults are for the paper's DANRA model (Zenodo 15131838: graph
+`7deg_rect_hi4`, no `--dynamic_time_deltas`). For gefion-1 use
+`--graph-levels 3 --dynamic-time-deltas`.
 
 The data is random noise, so this only checks that the software stack and
 checkpoint fit together, not forecast skill.
 
-The checkpoint should first be cleaned with `sanitize_checkpoint.py`.
+The gefion-1 checkpoint should first be cleaned with `sanitize_checkpoint.py`.
 
 Usage (in the ANNA environment):
     python check_checkpoint_compat.py <checkpoint> <configs_dir> <workdir> [--run-eval]
@@ -68,7 +75,6 @@ BOUNDARY_PL_VARS = [
 BOUNDARY_STATIC_VARS = ["land_sea_mask", "geopotential_at_surface"]
 MODEL_ARGS = [
     "--model", "hi_lam",
-    "--graph_name", "7deg_rect_hi3",
     "--hidden_dim", "300",
     "--hidden_dim_grid", "150",
     "--time_delta_enc_dim", "32",
@@ -77,7 +83,6 @@ MODEL_ARGS = [
     "--num_future_forcing_steps", "1",
     "--num_past_boundary_steps", "1",
     "--num_future_boundary_steps", "1",
-    "--dynamic_time_deltas",
 ]  # fmt: skip
 
 
@@ -197,7 +202,23 @@ def main():
         action="store_true",
         help="also run a one-step `train_model --eval test`",
     )
+    parser.add_argument(
+        "--graph-levels",
+        type=int,
+        default=4,
+        help="hierarchical mesh levels (paper model: 4, gefion-1: 3)",
+    )
+    parser.add_argument(
+        "--dynamic-time-deltas",
+        action="store_true",
+        help="model trained with --dynamic_time_deltas (gefion-1, not the "
+        "paper model)",
+    )
     args = parser.parse_args()
+    graph_name = f"7deg_rect_hi{args.graph_levels}"
+    model_args = MODEL_ARGS + ["--graph_name", graph_name]
+    if args.dynamic_time_deltas:
+        model_args.append("--dynamic_time_deltas")
 
     workdir = args.workdir.resolve()
     if workdir.exists() and any(workdir.iterdir()):
@@ -220,8 +241,8 @@ def main():
             "--config_path", str(nl_config),
             "--mesh_node_distance", "12500",
             "--archetype", "hierarchical",
-            "--max_num_levels", "3",
-            "--graph_name", "7deg_rect_hi3",
+            "--max_num_levels", str(args.graph_levels),
+            "--graph_name", graph_name,
         ],
         check=True,
     )  # fmt: skip
@@ -233,22 +254,31 @@ def main():
         config_path=str(nl_config)
     )
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    model_args = ckpt["hyper_parameters"]["args"]
-    model_args.config_path = str(nl_config)
-    model_args.load = str(args.checkpoint)
-    model_args.eval = "test"
-    model = HiLAM.load_from_checkpoint(
-        str(args.checkpoint),
-        map_location="cpu",
-        args=model_args,
-        config=config,
-        datastore=datastore,
-        datastore_boundary=datastore_boundary,
-    )
-    n_params = sum(p.numel() for p in model.parameters())
-    print(
-        f"OK: checkpoint loaded strictly into HiLAM ({n_params:,} parameters)"
-    )
+    n_tensors = len(ckpt["state_dict"])
+    if "hyper_parameters" in ckpt:
+        ckpt_args = ckpt["hyper_parameters"]["args"]
+        ckpt_args.config_path = str(nl_config)
+        ckpt_args.load = str(args.checkpoint)
+        ckpt_args.eval = "test"
+        model = HiLAM.load_from_checkpoint(
+            str(args.checkpoint),
+            map_location="cpu",
+            args=ckpt_args,
+            config=config,
+            datastore=datastore,
+            datastore_boundary=datastore_boundary,
+        )
+        n_params = sum(p.numel() for p in model.parameters())
+        print(
+            "OK: checkpoint loaded strictly into HiLAM "
+            f"({n_params:,} parameters)"
+        )
+    else:
+        print(
+            f"checkpoint ({n_tensors} tensors) has no stored training "
+            "arguments, checking the strict load through train_model --eval"
+        )
+        args.run_eval = True
 
     if args.run_eval:
         fp_output = workdir / "eval_output.zarr"
@@ -257,7 +287,7 @@ def main():
             [
                 sys.executable, "-m", "neural_lam.train_model",
                 "--config_path", str(nl_config),
-                *MODEL_ARGS,
+                *model_args,
                 "--eval", "test",
                 "--ar_steps_eval", "1",
                 "--val_steps_to_log", "1",

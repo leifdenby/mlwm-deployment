@@ -2,6 +2,7 @@
 # pyproject.toml, *.yaml, entry.sh, src/ and inference_artifact/
 .venv/
 inference_workdir/
+dev-data/
 tmp/
 tests/
 dev-utils/

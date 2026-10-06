@@ -456,7 +456,9 @@ def main():
     n_blocks_total = len(range(0, n_steps, args.block_steps))
     ds_stats.attrs = dict(
         description=(
-            "ERA5 boundary training statistics for ANNA (gefion-1), recomputed "
+            "Training statistics of the ERA5 boundary datastore "
+            "(era_7deg_model1_config) of the DANRA ML LAM models "
+            "(arXiv:2504.09340), recomputed "
             "from WeatherBench2 ERA5 over the era_danra_model1_subset box with "
             "configurations/ANNA/dev-utils/compute_era5_boundary_stats.py"
         ),

@@ -1,6 +1,6 @@
 """
 Create the inference datastores and neural-lam config for running ANNA
-(gefion-1) from regridded DINI (interior) and DINI or IFS (boundary) data.
+from regridded DINI (interior) and DINI or IFS (boundary) data.
 
 Inputs:
 - the inference artifact (`dev-utils/assemble_artifact.py`), providing the

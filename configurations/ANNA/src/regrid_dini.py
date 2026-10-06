@@ -1,6 +1,6 @@
 """
 Regrid a DINI (HARMONIE, 2 km Lambert) control forecast to the inputs ANNA
-(gefion-1) expects:
+expects:
 
 - interior: the DANRA grid (2.5 km Lambert, 589 x 789) with DANRA variable
   names and conventions, written as `{output}/interior_single_levels.zarr` and

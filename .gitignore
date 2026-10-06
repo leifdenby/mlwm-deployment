@@ -8,6 +8,11 @@ training_cli_args.yaml
 .env
 inference_artifact.zip
 inference_artifact/
+inference_artifact.*/
+# local development data (e.g. regridded DINI forecasts kept beyond the S3
+# retention period)
+dev-data/
+inference_workdir/
 
 *.zip
 .venv

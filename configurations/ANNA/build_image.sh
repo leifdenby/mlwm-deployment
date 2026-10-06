@@ -36,51 +36,45 @@ fi
 
 # Where the inference artifact comes from (see Containerfile): "local" uses the
 # directory inference_artifact/ assembled with dev-utils/assemble_artifact.py,
-# "s3" downloads it from S3
+# "zenodo" downloads the published inference package. The model checkpoint is
+# downloaded from Zenodo during the build in both cases (unless present).
 ARTIFACT_SOURCE=${ARTIFACT_SOURCE:-local}
+# published ANNA inference package on Zenodo (set once the record is published)
+PACKAGE_URL=${PACKAGE_URL:-}
+PACKAGE_MD5=${PACKAGE_MD5:-}
 
 if [ "$ARTIFACT_SOURCE" = "local" ]; then
 	if [ ! -f inference_artifact/artifact.yaml ]; then
 		echo "Error: ARTIFACT_SOURCE=local but inference_artifact/ hasn't been assembled."
 		echo "Create it with dev-utils/assemble_artifact.py (see its docstring),"
-		echo "or set ARTIFACT_SOURCE=s3."
+		echo "or set ARTIFACT_SOURCE=zenodo."
 		exit 1
 	fi
 	if grep -q "boundary_stats_placeholder: true" inference_artifact/artifact.yaml; then
 		echo "Warning: inference_artifact/ uses PLACEHOLDER boundary statistics."
 	fi
-elif [ "$ARTIFACT_SOURCE" = "s3" ]; then
+elif [ "$ARTIFACT_SOURCE" = "zenodo" ]; then
+	if [ -z "$PACKAGE_URL" ] || [ -z "$PACKAGE_MD5" ]; then
+		echo "Error: ARTIFACT_SOURCE=zenodo needs PACKAGE_URL and PACKAGE_MD5."
+		exit 1
+	fi
 	# the Containerfile always copies inference_artifact/, so make sure it exists
 	mkdir -p inference_artifact
-	# Check AWS credentials, S3 access is needed
-	if [ -z "$AWS_ACCESS_KEY_ID" ]; then
-		echo "Error: AWS_ACCESS_KEY_ID is not set. Please set it before running this script."
-		exit 1
-	fi
-	if [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
-		echo "Error: AWS_SECRET_ACCESS_KEY is not set. Please set it before running this script."
-		exit 1
-	fi
-	if [ -z "$AWS_DEFAULT_REGION" ]; then
-		echo "Error: AWS_DEFAULT_REGION is not set. We set it automatically to eu-central-1."
-		AWS_DEFAULT_REGION="eu-central-1"
-	fi
 else
-	echo "Error: unknown ARTIFACT_SOURCE=$ARTIFACT_SOURCE (local or s3)"
+	echo "Error: unknown ARTIFACT_SOURCE=$ARTIFACT_SOURCE (local or zenodo)"
 	exit 1
 fi
 
 # Pull base image with proxy
 HTTP_PROXY="$MLWM_PULL_PROXY" HTTPS_PROXY="$MLWM_PULL_PROXY" ${CONTAINER_APP} --log-level="$MLWM_LOG_LEVEL" pull "$MLWM_BASE_IMAGE"
 
-# Build image with AWS credentials as build arguments
+# Build image
 echo "Running ${CONTAINER_APP} build to create image $MLWM_IMAGE_NAME ..."
 ${CONTAINER_APP} build \
 	--build-arg BASE_IMAGE="$MLWM_BASE_IMAGE" \
 	--build-arg ARTIFACT_SOURCE="$ARTIFACT_SOURCE" \
-	--build-arg AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-	--build-arg AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-    --build-arg AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
+	--build-arg PACKAGE_URL="$PACKAGE_URL" \
+	--build-arg PACKAGE_MD5="$PACKAGE_MD5" \
 	-t "$MLWM_IMAGE_NAME" \
 	-f Containerfile \
 	.

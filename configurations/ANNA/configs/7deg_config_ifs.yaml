@@ -1,4 +1,4 @@
-# neural-lam config for running ANNA (gefion-1) with a DANRA-like interior
+# neural-lam config for running the DANRA ML LAM model (arXiv:2504.09340) with a DANRA-like interior
 # and operational IFS forecasts on the boundary.
 #
 # Same as `7deg_config_era5.yaml` (the training config) except for the
