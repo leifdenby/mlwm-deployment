@@ -7,7 +7,7 @@ boundaries (and in ERA5 layout for the training boundary), and each config is
 run through `mllam_data_prep.create_dataset` (with `domain_cropping` disabled,
 as that would require building the full DANRA interior dataset). The resulting
 boundary features must match the ERA5 training boundary exactly, in number and
-order, as that is what the gefion-1 checkpoint expects.
+order, as that is what the checkpoint expects.
 
 Requires a mllam-data-prep version supporting `domain_cropping` and
 `lead_time` in derived variables, i.e. the one pinned in the ANNA
@@ -16,6 +16,7 @@ Requires a mllam-data-prep version supporting `domain_cropping` and
     uv run --project configurations/ANNA --with pytest \
         pytest configurations/ANNA/tests
 """
+import sys
 from pathlib import Path
 
 import mllam_data_prep as mdp
@@ -26,6 +27,8 @@ import xarray as xr
 import yaml
 
 CONFIGS_DIR = Path(__file__).parent.parent / "configs"
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from model_configs import model_configs  # noqa: E402
 
 LEVELS = [100, 200, 400, 600, 700, 850, 925, 1000]
 SURFACE_VARS = [
@@ -255,3 +258,21 @@ def test_forecast_boundary_dims(boundary_datasets, name):
     }
     assert ds.elapsed_forecast_duration.size == 3
     assert not bool(ds.forcing.isnull().any())
+
+
+def test_model_yaml_neural_lam_configs():
+    model = yaml.safe_load((CONFIGS_DIR / "model.yaml").read_text())
+    assert model["neural_lam_configs"] == NL_CONFIGS
+
+
+@pytest.mark.parametrize("name", list(NL_CONFIGS))
+def test_model_configs_resolve(name):
+    # model.yaml -> neural-lam config -> datastore configs
+    configs = model_configs(CONFIGS_DIR, name)
+    assert configs.neural_lam_config == NL_CONFIGS[name]
+    assert configs.interior_datastore == "danra_model1_config.yaml"
+    assert configs.boundary_datastore == BOUNDARY_CONFIGS[name]
+    # every boundary is normalised with the ERA5 training statistics
+    assert configs.boundary_stats_datastore == BOUNDARY_CONFIGS["era5"]
+    for fn in [configs.interior_datastore, configs.boundary_datastore]:
+        assert (CONFIGS_DIR / fn).exists()

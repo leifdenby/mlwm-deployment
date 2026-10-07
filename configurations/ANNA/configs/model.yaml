@@ -22,6 +22,15 @@ training:
   neural_lam_dev_commit: e7d11c9a9b10d0165314d00f230243addd79d9fb
   datastore_config: 7deg_config.yaml (DANRA interior + ERA5 7.19 deg boundary)
 
+# neural-lam config per boundary source. Each names its interior and boundary
+# datastore configs (`datastore.config_path`, `datastore_boundary.config_path`)
+# and, for DINI/IFS, the ERA5 boundary datastore whose training statistics
+# normalise the boundary (`overload_stats_path`).
+neural_lam_configs:
+  era5: 7deg_config_era5.yaml  # as in training
+  dini: 7deg_config_dini.yaml
+  ifs: 7deg_config_ifs.yaml
+
 graph:
   name: 7deg_rect_hi4
   # as `rect_hi4` in neural-lam-dev scripts/danra_build_graphs.sh

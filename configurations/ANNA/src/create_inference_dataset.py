@@ -4,7 +4,10 @@ from regridded DINI (interior) and DINI or IFS (boundary) data.
 
 Inputs:
 - the inference artifact (`inference-artifact/assemble_artifact.py`), providing the
-  datastore configs, the neural-lam configs and the training statistics
+  datastore configs, the neural-lam configs and the training statistics. Which
+  configs are used for a boundary source follows from `configs/model.yaml`
+  (`neural_lam_configs`) and the datastore configs that neural-lam config
+  names (see `model_configs.py`)
 - the regridded interior (`interior_{single,pressure}_levels.zarr` from
   `regrid_dini.py`)
 - the boundary forecast in the IFS contract layout: `boundary.zarr` from
@@ -44,13 +47,11 @@ import xarray as xr
 import yaml
 from loguru import logger
 
-INTERIOR_NAME = "danra_model1_config"
-BOUNDARY_NAMES = dict(
-    dini="dini_7deg_model1_config", ifs="ifs_7deg_model1_config"
-)
-NL_CONFIG_NAMES = dict(
-    dini="7deg_config_dini.yaml", ifs="7deg_config_ifs.yaml"
-)
+from model_configs import TRAINING_BOUNDARY_SOURCE, model_configs
+
+# boundary sources ANNA can be run with operationally (configs/model.yaml
+# also has the ERA5 training config, for which there are no forecasts)
+BOUNDARY_SOURCES = ["dini", "ifs"]
 # interior time step and the boundary time step ANNA was trained with
 INTERIOR_STEP = datetime.timedelta(hours=3)
 BOUNDARY_STEP = datetime.timedelta(hours=6)
@@ -86,10 +87,11 @@ def _write_config(config, fp):
 
 
 def _create_interior_datastore(
-    artifact, interior_dir, analysis_time, interior_end, workdir
+    artifact, configs, interior_dir, analysis_time, interior_end, workdir
 ):
+    name = configs.name(configs.interior_datastore)
     config = mdp.Config.from_yaml_file(
-        artifact / "configs" / f"{INTERIOR_NAME}.yaml"
+        artifact / "configs" / configs.interior_datastore
     )
     for input_name, input_config in config.inputs.items():
         input_config.path = str(
@@ -106,13 +108,11 @@ def _create_interior_datastore(
         name: mdp_config.Split(start=start, end=end) for name in SPLIT_NAMES
     }
 
-    fp_config = workdir / f"{INTERIOR_NAME}.yaml"
+    fp_config = workdir / f"{name}.yaml"
     _write_config(config, fp_config)
 
     ds = mdp.create_dataset(config=config)
-    ds_stats = xr.open_zarr(
-        artifact / "stats" / f"{INTERIOR_NAME}.stats.zarr"
-    ).load()
+    ds_stats = xr.open_zarr(artifact / "stats" / f"{name}.stats.zarr").load()
     for category in ["state", "forcing", "static"]:
         dim = f"{category}_feature"
         if dim in ds_stats.dims and list(ds_stats[dim].values) != list(
@@ -135,7 +135,7 @@ def _create_interior_datastore(
         raise ValueError(
             f"missing values in the interior datastore: {n_missing}"
         )
-    ds.to_zarr(workdir / f"{INTERIOR_NAME}.zarr", mode="w", consolidated=True)
+    ds.to_zarr(workdir / f"{name}.zarr", mode="w", consolidated=True)
     logger.info(
         f"interior datastore: {ds.time.size} time steps {start} .. {end}, "
         f"{ds.grid_index.size} grid points"
@@ -145,14 +145,17 @@ def _create_interior_datastore(
 
 def _create_boundary_datastore(
     artifact,
+    configs,
     boundary_source,
     fp_boundary,
     fp_interior_config,
     boundary_end,
     workdir,
 ):
-    name = BOUNDARY_NAMES[boundary_source]
-    config = mdp.Config.from_yaml_file(artifact / "configs" / f"{name}.yaml")
+    name = configs.name(configs.boundary_datastore)
+    config = mdp.Config.from_yaml_file(
+        artifact / "configs" / configs.boundary_datastore
+    )
     for input_config in config.inputs.values():
         input_config.path = str(Path(fp_boundary).resolve())
     # crop around the (small) inference interior dataset, rather than the
@@ -190,10 +193,10 @@ def _create_boundary_datastore(
 
 
 def _create_neural_lam_config(
-    artifact, boundary_source, fp_interior_config, fp_boundary_config, workdir
+    artifact, configs, fp_interior_config, fp_boundary_config, workdir
 ):
     nl_config = yaml.safe_load(
-        (artifact / "configs" / NL_CONFIG_NAMES[boundary_source]).read_text()
+        (artifact / "configs" / configs.neural_lam_config).read_text()
     )
     nl_config["datastore"]["config_path"] = fp_interior_config.name
     boundary = nl_config["datastore_boundary"]
@@ -224,6 +227,13 @@ def create_inference_datasets(
         Path(workdir),
     )
     workdir.mkdir(parents=True, exist_ok=True)
+    if boundary_source == TRAINING_BOUNDARY_SOURCE:
+        raise ValueError(
+            f"{boundary_source} is the training boundary, use one of "
+            f"{BOUNDARY_SOURCES}"
+        )
+    configs = model_configs(artifact / "configs", boundary_source)
+    logger.info(f"configs for the {boundary_source} boundary: {configs}")
     # the initial states are at analysis_time and +3h, so the first prediction
     # is at +6h
     if (
@@ -243,10 +253,11 @@ def create_inference_datasets(
     boundary_end = analysis_time + forecast_duration + BOUNDARY_STEP
 
     fp_interior_config = _create_interior_datastore(
-        artifact, interior_dir, analysis_time, interior_end, workdir
+        artifact, configs, interior_dir, analysis_time, interior_end, workdir
     )
     fp_boundary_config = _create_boundary_datastore(
         artifact,
+        configs,
         boundary_source,
         boundary,
         fp_interior_config,
@@ -260,7 +271,7 @@ def create_inference_datasets(
     )
     return _create_neural_lam_config(
         artifact,
-        boundary_source,
+        configs,
         fp_interior_config,
         fp_boundary_config,
         workdir,
@@ -294,7 +305,7 @@ def main():
         help="boundary forecast zarr (IFS contract)",
     )
     parser.add_argument(
-        "--boundary-source", choices=sorted(BOUNDARY_NAMES), default="dini"
+        "--boundary-source", choices=BOUNDARY_SOURCES, default="dini"
     )
     parser.add_argument(
         "--analysis-time",

@@ -48,6 +48,9 @@ import pandas as pd  # noqa: E402
 import torch  # noqa: E402
 import xarray as xr  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from model_configs import TRAINING_BOUNDARY_SOURCE, model_configs  # noqa: E402
+
 LEVELS = [100, 200, 400, 600, 700, 850, 925, 1000]
 INTERIOR_SL_VARS = [
     "pres_seasurface",
@@ -96,7 +99,7 @@ def _set_time_range(config, dim, times):
         split.start, split.end = str(times[0]), str(times[-1])
 
 
-def _create_interior(configs_dir, workdir, times, rng):
+def _create_interior(configs_dir, fn_config, workdir, times, rng):
     proj = ccrs.LambertConformal(
         central_longitude=25.0,
         central_latitude=56.7,
@@ -138,9 +141,7 @@ def _create_interior(configs_dir, workdir, times, rng):
     ds_sl.to_zarr(workdir / "interior_sl.zarr")
     ds_pl.to_zarr(workdir / "interior_pl.zarr")
 
-    config = mdp.Config.from_yaml_file(
-        configs_dir / "danra_model1_config.yaml"
-    )
+    config = mdp.Config.from_yaml_file(configs_dir / fn_config)
     for name, input_config in config.inputs.items():
         fn = (
             "interior_pl.zarr"
@@ -150,11 +151,20 @@ def _create_interior(configs_dir, workdir, times, rng):
         input_config.path = str(workdir / fn)
     _set_time_range(config, "time", times)
     # NB: sort_keys=False, sorted keys would change the feature order
-    config.to_yaml_file(workdir / "danra_model1_config.yaml", sort_keys=False)
+    config.to_yaml_file(workdir / fn_config, sort_keys=False)
     return lonlat[..., 1], lonlat[..., 0]
 
 
-def _create_boundary(configs_dir, workdir, times, lat2d, lon2d, rng):
+def _create_boundary(
+    configs_dir,
+    fn_config,
+    fn_interior_config,
+    workdir,
+    times,
+    lat2d,
+    lon2d,
+    rng,
+):
     lats = np.arange(lat2d.max() + 8, lat2d.min() - 8, -0.25)
     lons = np.arange(lon2d.min() - 12, lon2d.max() + 12, 0.25)
     data_vars = {}
@@ -176,18 +186,14 @@ def _create_boundary(configs_dir, workdir, times, lat2d, lon2d, rng):
     coords = dict(time=times, level=LEVELS, latitude=lats, longitude=lons)
     xr.Dataset(data_vars, coords=coords).to_zarr(workdir / "era5.zarr")
 
-    config = mdp.Config.from_yaml_file(
-        configs_dir / "era_7deg_model1_config.yaml"
-    )
+    config = mdp.Config.from_yaml_file(configs_dir / fn_config)
     for input_config in config.inputs.values():
         input_config.path = str(workdir / "era5.zarr")
     config.output.domain_cropping.interior_dataset_config_path = str(
-        workdir / "danra_model1_config.yaml"
+        workdir / fn_interior_config
     )
     _set_time_range(config, "time", times)
-    config.to_yaml_file(
-        workdir / "era_7deg_model1_config.yaml", sort_keys=False
-    )
+    config.to_yaml_file(workdir / fn_config, sort_keys=False)
 
 
 def main():
@@ -231,13 +237,26 @@ def main():
 
     # three days: enough for complete 00/12 UTC samples after the interior
     # and (6-hourly) boundary data have been aligned
+    # the training (ERA5 boundary) configs, as named in model.yaml
+    configs = model_configs(args.configs_dir, TRAINING_BOUNDARY_SOURCE)
     times = pd.date_range("2000-01-01T00:00", "2000-01-04T00:00", freq="3h")
-    lat2d, lon2d = _create_interior(args.configs_dir, workdir, times, rng)
+    lat2d, lon2d = _create_interior(
+        args.configs_dir, configs.interior_datastore, workdir, times, rng
+    )
     btimes = pd.date_range(times[0], times[-1], freq="6h")
-    _create_boundary(args.configs_dir, workdir, btimes, lat2d, lon2d, rng)
+    _create_boundary(
+        args.configs_dir,
+        configs.boundary_datastore,
+        configs.interior_datastore,
+        workdir,
+        btimes,
+        lat2d,
+        lon2d,
+        rng,
+    )
 
-    nl_config = workdir / "7deg_config_era5.yaml"
-    shutil.copy(args.configs_dir / "7deg_config_era5.yaml", nl_config)
+    nl_config = workdir / configs.neural_lam_config
+    shutil.copy(args.configs_dir / configs.neural_lam_config, nl_config)
     subprocess.run(
         [
             sys.executable, "-m", "neural_lam.build_rectangular_graph",

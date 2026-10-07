@@ -52,12 +52,21 @@ All in [configs/](configs/):
 
 | File | What |
 |---|---|
-| `model.yaml` | the model to run: checkpoint (Zenodo URL, md5), graph recipe, neural-lam arguments |
+| `model.yaml` | the model to run: checkpoint (Zenodo URL, md5), graph recipe, neural-lam arguments, and which neural-lam config to use per boundary source (`neural_lam_configs`: `era5` as in training, `dini`, `ifs`) |
 | `danra_model1_config.yaml` | interior (DANRA) datastore, as in training |
 | `era_7deg_model1_config.yaml` | ERA5 boundary datastore the model was trained with; reference for the boundary features and their (ERA5) normalisation statistics |
 | `ifs_7deg_model1_config.yaml` | operational IFS boundary. **Its header is the contract for the IFS GRIB → zarr conversion** (variables, units, dims, lead times, and the 0.25° box lat 40.0–72.0, lon −27.0–39.5; the east edge must be exactly 39.5°E) |
 | `dini_7deg_model1_config.yaml` | DINI boundary, in the same layout as IFS |
 | `7deg_config_{era5,ifs,dini}.yaml` | neural-lam configs; IFS and DINI are normalised with the ERA5 training statistics (`overload_stats_path`) |
+
+The configs are linked in a chain, and each link is stated in one place only:
+1. `model.yaml` names the neural-lam config for each boundary source;
+2. that neural-lam config names its interior and boundary datastore configs
+   (`datastore.config_path`, `datastore_boundary.config_path`);
+3. for DINI/IFS, it also names the ERA5 training boundary datastore whose
+   statistics normalise the boundary (`overload_stats_path`).
+
+`src/model_configs.py` follows this chain for the scripts.
 
 ## Inference artifact
 

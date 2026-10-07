@@ -87,6 +87,37 @@ def _import_module(name, directory=HERE):
     return module
 
 
+def _check_model_configs(configs_dir):
+    """
+    Check that the training datastores this package provides statistics and
+    grids for are the ones the configs use: the interior and boundary
+    datastores of the training (ERA5) neural-lam config named in model.yaml,
+    and the boundary statistics every boundary source is normalised with.
+    """
+    mc = _import_module("model_configs", directory=ANNA_DIR / "src")
+    training = mc.model_configs(configs_dir, mc.TRAINING_BOUNDARY_SOURCE)
+    names = dict(
+        interior=(training.interior_datastore, INTERIOR_DATASTORE_NAME),
+        boundary=(training.boundary_datastore, BOUNDARY_DATASTORE_NAME),
+    )
+    for source in mc.boundary_sources(configs_dir):
+        configs = mc.model_configs(configs_dir, source)
+        names[f"{source} interior"] = (
+            configs.interior_datastore,
+            INTERIOR_DATASTORE_NAME,
+        )
+        names[f"{source} boundary statistics"] = (
+            configs.boundary_stats_datastore,
+            BOUNDARY_DATASTORE_NAME,
+        )
+    for what, (fn_config, expected) in names.items():
+        if mc.ModelConfigs.name(fn_config) != expected:
+            raise SystemExit(
+                f"{what} datastore of the configs is {fn_config}, but this "
+                f"package provides the statistics and grids of {expected}"
+            )
+
+
 def _sha256(fp):
     h = hashlib.sha256()
     with open(fp, "rb") as fh:
@@ -243,6 +274,7 @@ def main():
     if args.zip is not None and args.zip.exists():
         raise SystemExit(f"{args.zip} already exists, remove it first")
 
+    _check_model_configs(args.configs_dir)
     sanitize = _import_module("sanitize_checkpoint")
     stats_script = _import_module("compute_era5_boundary_stats")
 
