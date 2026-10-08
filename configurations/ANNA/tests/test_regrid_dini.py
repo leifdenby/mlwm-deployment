@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import xarray as xr
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import regrid_dini as rd  # noqa: E402
@@ -83,6 +84,37 @@ def test_smooth():
     assert smoothed[13, 20] == 0.0 and smoothed[27, 20] == 0.0
     # n <= 1 is a no-op
     np.testing.assert_array_equal(rd.smooth(spike, 1), spike)
+
+
+def _fields(shape):
+    """Random (..., y, x) fields as a dask-backed DataArray, 2D chunks."""
+    dims = ("time", "pressure", "y", "x")[-len(shape) :]
+    data = np.random.default_rng(2).normal(size=shape)
+    da = xr.DataArray(data, dims=dims)
+    return da.chunk({d: 1 for d in dims[:-2]})
+
+
+def test_bilinear_leading_dims_and_lazy():
+    x, y = np.arange(30.0), np.arange(20.0)
+    rng = np.random.default_rng(3)
+    x_tgt, y_tgt = rng.uniform(0, 29, (4, 5)), rng.uniform(0, 19, (4, 5))
+    interp = rd.BilinearInterpolator(x, y, x_tgt, y_tgt)
+    da = _fields((3, 2, 20, 30))
+    expected = np.array([[interp(f2d) for f2d in f3d] for f3d in da.values])
+    np.testing.assert_array_equal(interp(da.values), expected)
+    lazy = interp.apply(da, ("y_out", "x_out"))
+    assert lazy.chunks is not None and lazy.dims[-2:] == ("y_out", "x_out")
+    np.testing.assert_array_equal(lazy.values, expected)
+
+
+def test_smooth_leading_dims_and_lazy():
+    da = _fields((3, 2, 20, 30))
+    # each 2D field is smoothed on its own, not across time/levels
+    expected = np.array([[rd.smooth(f2d, 5) for f2d in f3d] for f3d in da.values])
+    np.testing.assert_array_equal(rd.smooth(da.values, 5), expected)
+    lazy = rd.smooth_lazy(da, 5)
+    assert lazy.chunks is not None and lazy.dims == da.dims
+    np.testing.assert_array_equal(lazy.values, expected)
 
 
 def test_saturation_vapour_pressure():

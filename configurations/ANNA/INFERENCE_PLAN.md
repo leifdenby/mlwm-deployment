@@ -307,6 +307,11 @@ Original step description:
 - **Regridding speed:** the regrid process uses ~27% of one CPU and waits on S3, reading one 24 MB (5 MB compressed) DINI chunk at a time.
   - A benchmark of one time step (55 fields): serial 16.6 s; one concurrent `dask.compute` 11.0 s (1.5×).
   - That's about 25 MB/s compressed, the limit of this machine's **WiFi** link (its Ethernet ports are down). On a wired or in-AWS host the concurrent read should gain much more.
+  - **Done (2026-10-08): `regrid_dini.py` now regrids with dask.**
+    - The interior and the boundary are built as lazy xarray pipelines. `BilinearInterpolator.apply` and `smooth_lazy` wrap the existing numpy kernels in `xr.apply_ufunc(dask="parallelized")`, one 2D field per block.
+    - Both are computed together in one `dask.compute`, so the DINI chunks are fetched concurrently and those used by both are read once.
+    - The outputs are **bit-identical** to the serial version (`xr.testing.assert_identical`, PT12H 2026-10-01T00Z).
+    - PT12H regridding now takes 75 s instead of ~3.5 min (peak RSS 6 GB). `entry.sh` end to end takes ~5 min instead of 7.
 - **Viewer (Gridlook, dmidev.org/dini) ran out of memory** on the first outputs. This wasn't the chunking: ANNA's fields are 1.9 MB chunks, against DINI's 24 MB. Without a `grid_mapping`, Gridlook takes 3D fields as a regular lat/lon grid, so it read the 1D x/y (Lambert metres, up to ±2·10⁶) as degrees. `convert_output.py` now writes the grid as DINI does: x/y/lat/lon CF attrs, a `danra_projection` grid mapping (CF Lambert parameters and WKT, from `extra.projection` of `danra_model1_config.yaml`) named by every field, `coordinates: lat lon`, and time in seconds since 1970. Projecting lat/lon with it reproduces x/y to < 1e-8 m. DANRA's own `danra_projection` has wrong CF parameters (central meridian 0.025, origin latitude 0.0567; its WKT is right), so it isn't copied.
 - The outputs of this run are in `s3://anna-forecasts/2026-10-01T000000Z/{single,pressure}_levels.zarr` (public read; for the viewer the bucket needs the same CORS rule as `harmonie-zarr`).
 

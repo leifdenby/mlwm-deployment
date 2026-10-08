@@ -40,8 +40,11 @@ Usage:
 """
 import argparse
 import datetime
+import time
 from pathlib import Path
 
+import dask
+import dask.diagnostics
 import isodate
 import numpy as np
 import pyproj
@@ -217,14 +220,29 @@ class BilinearInterpolator:
         self.n_outside = n_outside
 
     def __call__(self, field):
-        """Interpolate a 2D (y, x) field."""
+        """Interpolate a (..., y, x) field (the last two axes)."""
         f = np.asarray(field)
         i0, j0, wx, wy = self.i0, self.j0, self.wx, self.wy
         return (
-            f[j0, i0] * (1 - wx) * (1 - wy)
-            + f[j0, i0 + 1] * wx * (1 - wy)
-            + f[j0 + 1, i0] * (1 - wx) * wy
-            + f[j0 + 1, i0 + 1] * wx * wy
+            f[..., j0, i0] * (1 - wx) * (1 - wy)
+            + f[..., j0, i0 + 1] * wx * (1 - wy)
+            + f[..., j0 + 1, i0] * (1 - wx) * wy
+            + f[..., j0 + 1, i0 + 1] * wx * wy
+        )
+
+    def apply(self, da, out_dims):
+        """
+        Interpolate a (lazy) DataArray with (y, x) dims, block by block with
+        dask; the target points get dims `out_dims`.
+        """
+        return xr.apply_ufunc(
+            self,
+            da,
+            input_core_dims=[["y", "x"]],
+            output_core_dims=[list(out_dims)],
+            dask="parallelized",
+            output_dtypes=[np.float64],
+            dask_gufunc_kwargs=dict(output_sizes=dict(zip(out_dims, self.shape))),
         )
 
 
@@ -283,38 +301,33 @@ def _regrid_interior(
     interp = BilinearInterpolator(
         ds_sl.x.values, ds_sl.y.values, x_tgt, y_tgt, outside=outside
     )
-    theta_danra = grid_x_axis_angle(lat, lon)
+    # interpolated fields get dims (..., y_out, x_out), the DANRA grid
+    out_dims = ("y_out", "x_out")
+    theta_danra = xr.DataArray(grid_x_axis_angle(lat, lon), dims=out_dims)
 
-    def _winds(ds, u_name, v_name, sel):
-        u_e, v_e = grid_to_earth(
-            ds[u_name].sel(sel).values, ds[v_name].sel(sel).values, theta_dini
+    # lazy: nothing is read until the caller computes the result
+    sl_in = ds_sl.sel(time=times)
+    pl_in = ds_pl.sel(time=times, pressure=LEVELS)
+
+    def _winds(ds, u_name, v_name):
+        u_e, v_e = grid_to_earth(ds[u_name], ds[v_name], theta_dini)
+        return earth_to_grid(
+            interp.apply(u_e, out_dims), interp.apply(v_e, out_dims), theta_danra
         )
-        return earth_to_grid(interp(u_e), interp(v_e), theta_danra)
+
+    sl = {v: interp.apply(sl_in[v], out_dims) for v in INTERIOR_SL_VARS}
+    sl["u10m"], sl["v10m"] = _winds(sl_in, "u10m", "v10m")
+    pl = {v: interp.apply(pl_in[v], out_dims) for v in INTERIOR_PL_VARS}
+    pl["u"], pl["v"] = _winds(pl_in, "u", "v")
+    sl = {v: da.astype("f4").data for v, da in sl.items()}
+    pl = {
+        v: da.transpose("time", "pressure", *out_dims).astype("f4").data
+        for v, da in pl.items()
+    }
+    # DANRA relative humidity is a fraction (despite being labelled "%")
+    pl["r"] = pl["r"] / 100.0
 
     dims = ("time", "y", "x")
-    sl = {
-        v: np.empty((len(times),) + interp.shape, "f4")
-        for v in INTERIOR_SL_VARS + ["u10m", "v10m"]
-    }
-    pl = {
-        v: np.empty((len(times), len(LEVELS)) + interp.shape, "f4")
-        for v in INTERIOR_PL_VARS + ["u", "v"]
-    }
-    for n, t in enumerate(times):
-        logger.info(f"interior: {t}")
-        for v in INTERIOR_SL_VARS:
-            sl[v][n] = interp(ds_sl[v].sel(time=t).values)
-        sl["u10m"][n], sl["v10m"][n] = _winds(
-            ds_sl, "u10m", "v10m", dict(time=t)
-        )
-        for k, p in enumerate(LEVELS):
-            sel = dict(time=t, pressure=p)
-            for v in INTERIOR_PL_VARS:
-                pl[v][n, k] = interp(ds_pl[v].sel(sel).values)
-            pl["u"][n, k], pl["v"][n, k] = _winds(ds_pl, "u", "v", sel)
-    # DANRA relative humidity is a fraction (despite being labelled "%")
-    pl["r"] /= 100.0
-
     coords = dict(
         time=("time", np.array(times)),
         x=danra_grid.x.values,
@@ -342,11 +355,29 @@ def smooth(field, n_cells):
     sampling them there. Point samples of 2 km fields keep small-scale
     variability (e.g. vertical velocity over orography) that 0.25 deg ERA5
     doesn't have.
+
+    Smooths over the last two (y, x) axes only.
     """
+    field = np.asarray(field)
     if n_cells <= 1:
-        return np.asarray(field)
+        return field
     return scipy.ndimage.uniform_filter(
-        np.asarray(field, dtype="f8"), size=n_cells, mode="nearest"
+        field.astype("f8"),
+        size=(1,) * (field.ndim - 2) + (n_cells, n_cells),
+        mode="nearest",
+    )
+
+
+def smooth_lazy(da, n_cells):
+    """`smooth` of a (lazy) DataArray with (y, x) dims, block by block."""
+    return xr.apply_ufunc(
+        smooth,
+        da,
+        n_cells,
+        input_core_dims=[["y", "x"], []],
+        output_core_dims=[["y", "x"]],
+        dask="parallelized",
+        output_dtypes=[np.float64],
     )
 
 
@@ -375,54 +406,51 @@ def _regrid_boundary(
         f"boundary: smoothing over {n_cells}x{n_cells} DINI grid cells before sampling"
     )
 
+    out_dims = ("latitude", "longitude")
+
     def sample(field):
         return interp(smooth(field, n_cells))
 
-    def _earth_winds(ds, u_name, v_name, sel):
-        u_e, v_e = grid_to_earth(
-            ds[u_name].sel(sel).values, ds[v_name].sel(sel).values, theta_dini
-        )
-        return sample(u_e), sample(v_e)
+    def sample_lazy(da):
+        return interp.apply(smooth_lazy(da, n_cells), out_dims)
 
-    shape_sl = (1, len(times)) + interp.shape
-    shape_pl = (1, len(times), len(LEVELS)) + interp.shape
-    sl_names = list(BOUNDARY_SL_VARS.values()) + [
-        "10m_u_component_of_wind",
-        "10m_v_component_of_wind",
-    ]
-    pl_names = list(BOUNDARY_PL_VARS.values()) + [
-        "u_component_of_wind",
-        "v_component_of_wind",
-        "specific_humidity",
-        "vertical_velocity",
-    ]
-    sl = {v: np.empty(shape_sl, "f4") for v in sl_names}
-    pl = {v: np.empty(shape_pl, "f4") for v in pl_names}
-    for n, t in enumerate(times):
-        logger.info(f"boundary: {t}")
-        for v_dini, v_era in BOUNDARY_SL_VARS.items():
-            sl[v_era][0, n] = sample(ds_sl[v_dini].sel(time=t).values)
-        (
-            sl["10m_u_component_of_wind"][0, n],
-            sl["10m_v_component_of_wind"][0, n],
-        ) = _earth_winds(ds_sl, "u10m", "v10m", dict(time=t))
-        for k, p in enumerate(LEVELS):
-            sel = dict(time=t, pressure=p)
-            for v_dini, v_era in BOUNDARY_PL_VARS.items():
-                pl[v_era][0, n, k] = sample(ds_pl[v_dini].sel(sel).values)
-            (
-                pl["u_component_of_wind"][0, n, k],
-                pl["v_component_of_wind"][0, n, k],
-            ) = _earth_winds(ds_pl, "u", "v", sel)
-            # derive on the DINI grid, then interpolate
-            t_k = ds_pl["t"].sel(sel).values
-            p_pa = p * 100.0
-            q = specific_humidity(
-                ds_pl["r"].sel(sel).values / 100.0, t_k, p_pa
-            )
-            w = omega_from_w(ds_pl["tw"].sel(sel).values, t_k, q, p_pa)
-            pl["specific_humidity"][0, n, k] = sample(q)
-            pl["vertical_velocity"][0, n, k] = sample(w)
+    # lazy: nothing is read until the caller computes the result
+    sl_in = ds_sl.sel(time=times)
+    pl_in = ds_pl.sel(time=times, pressure=LEVELS)
+
+    def _earth_winds(ds, u_name, v_name):
+        u_e, v_e = grid_to_earth(ds[u_name], ds[v_name], theta_dini)
+        return sample_lazy(u_e), sample_lazy(v_e)
+
+    sl = {
+        v_era: sample_lazy(sl_in[v_dini])
+        for v_dini, v_era in BOUNDARY_SL_VARS.items()
+    }
+    (
+        sl["10m_u_component_of_wind"],
+        sl["10m_v_component_of_wind"],
+    ) = _earth_winds(sl_in, "u10m", "v10m")
+    pl = {
+        v_era: sample_lazy(pl_in[v_dini])
+        for v_dini, v_era in BOUNDARY_PL_VARS.items()
+    }
+    (
+        pl["u_component_of_wind"],
+        pl["v_component_of_wind"],
+    ) = _earth_winds(pl_in, "u", "v")
+    # derive on the DINI grid, then interpolate
+    t_k = pl_in["t"]
+    p_pa = xr.DataArray(np.array(LEVELS) * 100.0, dims="pressure")
+    q = specific_humidity(pl_in["r"] / 100.0, t_k, p_pa)
+    w = omega_from_w(pl_in["tw"], t_k, q, p_pa)
+    pl["specific_humidity"] = sample_lazy(q)
+    pl["vertical_velocity"] = sample_lazy(w)
+    # layout (analysis time, lead time[, level], latitude, longitude)
+    sl = {v: da.astype("f4").data[None] for v, da in sl.items()}
+    pl = {
+        v: da.transpose("time", "pressure", *out_dims).astype("f4").data[None]
+        for v, da in pl.items()
+    }
 
     dims_sl = ("time", "prediction_timedelta", "latitude", "longitude")
     dims_pl = (
@@ -473,9 +501,15 @@ def regrid(
     analysis_time = ds_sl.time.values[0].astype("datetime64[s]").item()
     logger.info(f"DINI forecast from {analysis_time}, output to {output}")
     transformer = _dini_transformer(ds_sl)
-    theta_dini = grid_x_axis_angle(ds_sl.lat.values, ds_sl.lon.values)
+    theta_dini = xr.DataArray(
+        grid_x_axis_angle(ds_sl.lat.values, ds_sl.lon.values), dims=("y", "x")
+    )
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
+    # the regridded datasets are built lazily and computed together at the
+    # end, so that dask reads the DINI chunks concurrently (and only once
+    # when both the interior and the boundary use them)
+    outputs = {}
 
     if interior:
         # two interior steps beyond the forecast are needed, see
@@ -500,15 +534,9 @@ def regrid(
             description="DINI regridded to the DANRA grid (regrid_dini.py)",
         )
         ds_sl_out.attrs = ds_pl_out.attrs = attrs
-        ds_sl_out.to_zarr(
-            output / "interior_single_levels.zarr", mode="w", consolidated=True
-        )
-        ds_pl_out.to_zarr(
-            output / "interior_pressure_levels.zarr",
-            mode="w",
-            consolidated=True,
-        )
-        logger.info(f"wrote interior ({len(times)} time steps) to {output}")
+        outputs["interior_single_levels.zarr"] = ds_sl_out
+        outputs["interior_pressure_levels.zarr"] = ds_pl_out
+        logger.info(f"interior: {len(times)} time steps")
 
     if boundary:
         # one extra boundary step for `num_future_boundary_steps=1`
@@ -537,10 +565,17 @@ def regrid(
             n_points_outside_dini_filled_nearest=interp.n_outside,
             smoothing_km=boundary_smoothing_km,
         )
-        ds_b.to_zarr(output / "boundary.zarr", mode="w", consolidated=True)
-        logger.info(
-            f"wrote boundary ({len(times)} lead times) to {output / 'boundary.zarr'}"
-        )
+        outputs["boundary.zarr"] = ds_b
+        logger.info(f"boundary: {len(times)} lead times")
+
+    logger.info("reading and regridding DINI")
+    start = time.perf_counter()
+    with dask.diagnostics.ProgressBar(dt=10):
+        computed = dask.compute(*outputs.values())
+    logger.info(f"regridded in {time.perf_counter() - start:.0f} s")
+    for name, ds in zip(outputs, computed):
+        ds.to_zarr(output / name, mode="w", consolidated=True)
+        logger.info(f"wrote {output / name}")
 
 
 def main():
