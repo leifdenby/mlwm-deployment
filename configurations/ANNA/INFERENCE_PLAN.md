@@ -126,7 +126,7 @@ Learned while implementing (needed in later steps):
 - neural-lam-dev's `main()` is wrapped in `@logger.catch`: **exceptions are logged but the exit code is 0**. `entry.sh` must check that the output zarr exists rather than rely on the exit code.
 - **Never write mdp configs with sorted keys.** `Config.to_yaml_file()` sorts keys by default, which reorders inputs and variables and so changes the feature order the checkpoint expects. Use `to_yaml_file(..., sort_keys=False)` (applies to `create_inference_dataset.py`, step 5).
 - Eval output format: `state(start_time, elapsed_forecast_duration, state_feature, x, y)`. Check that `recreate_inputs` (step 6) accepts it.
-- In the container, torch is constrained to the base image's version (2.10), whereas locally torch 2.14 was used with torch-geometric 2.3.1. Re-check in the container build (step 6).
+- In the container, torch is constrained to the base image's version (2.10), whereas locally torch 2.14 was used with torch-geometric 2.3.1. Re-check in the container build (step 7). Outside the container, torch 2.14.1 + torch-geometric 2.3.1 ran the forecast on the DGX Spark GPU (step 6).
 
 Original step description:
 - `neural-lam` → `joeloskarsson/neural-lam-dev@research`, pinned to a sha that includes `e7d11c9`.
@@ -267,8 +267,24 @@ Original step description:
 - Merge the training stats into the created dataset in the script. The pinned mdp's `create_dataset()` has no `ds_stats` argument (step 2).
 - Write every config with `to_yaml_file(..., sort_keys=False)`, or the feature order changes (step 2).
 
-### 6. `entry.sh`: add graph, eval and back-transform — IN PROGRESS
-**Status (2026-10-08):** `entry.sh` runs regrid → datastores → graph → `train_model --eval test` → `convert_output.py`. The model arguments, graph and checkpoint come from `model.yaml`. The old gefion-1 arguments below are superseded.
+### 6. `entry.sh`: add graph, eval and back-transform — DONE (outside the container)
+**Status (2026-10-08):** `entry.sh` runs regrid → datastores → graph → `train_model --eval test` → `convert_output.py`. The model arguments, graph and checkpoint come from `model.yaml`. The old gefion-1 arguments below are superseded. The container build is still to be checked (step 7).
+
+**End-to-end run (2026-10-08), DGX Spark** (GB10, aarch64, 119 GB unified memory), DINI 2026-10-01T00Z, PT12H, DINI boundary, artifact `anna-local` (exact boundary stats, paper checkpoint). Nothing needed fixing:
+- **torch** as locked (2.14.1) is PyPI's aarch64 CUDA 13.0 build (`+cu130`) and runs on the GB10 (sm_121). The pinned stack needs no change; torch-geometric 2.3.1 works.
+- **Time:** 7 min in total. Regridding 3.5 min (7 interior steps at ~17 s, 4 boundary steps at ~19 s; ~24 min on the laptop), datastores 35 s, graph 1.5 min, forecast 22 s (3 steps), conversion 10 s.
+- **Memory** (sampled every 15 s, so peaks may be missed): about 44 GB of system memory in use during the forecast, including 27 GB on the GPU (unified memory), from ~12 GB at idle. The graph build used about 6 GB. The forecast therefore needs a GPU with roughly 30 GB, or a lot of RAM on CPU; the laptop wasn't enough.
+- The graph has 482,735 grid nodes (464,721 interior + 18,014 boundary) and 69,386 mesh nodes.
+- neural-lam's test losses per step (normalised, against DINI as "truth"): 2.13, 3.29, 3.84.
+- **`dev-utils/check_forecast_output.py`: OK.** Valid times T+6/9/12 h, all finite and within physical ranges. Differences from DINI at T+12 h (RMSE / bias):
+  - t2m 0.78 / +0.19 K, u10m and v10m 1.1 / +0.2 m/s, MSLP 41 / +22 Pa;
+  - t 0.57–0.75 K at all levels, biases < 0.25 K;
+  - u and v 1.4–2.1 m/s in the lower troposphere, 2.5–3.9 m/s at 200–400 hPa (jet level);
+  - z 30–34 m²/s² (about 3 m) at 600–1000 hPa, 133 m²/s² (14 m) at 100 hPa;
+  - r 0.07–0.21, tw 0.04–0.15 m/s (similar to DINI's own std of tw); net shortwave 79 W/m² and net longwave 18 W/m², from cloud differences.
+
+  These are the size of the differences between two good short-range forecasts, with no sign of unit, wind-rotation or normalisation errors (those would give errors of several K or tens of m/s). Biases are small everywhere. The upper-level winds and r differ most, as expected for a 2.5 km model against DINI.
+- Reruns: `SKIP_COMPLETED=true` with the same workdir starts at the forecast.
 
 First runs on DINI 2026-10-01T00Z, laptop CPU:
 - **PT6H failed while loading the model.** neural-lam's `ARModel` builds a `WeatherDataset` per split with the default `ar_steps=3`, which needs 7 interior time steps. **The minimum forecast is therefore 12 h.** `entry.sh` and `create_inference_dataset.py` enforce this, and `dev-utils/check_inference_sample.py` now builds those datasets too.
