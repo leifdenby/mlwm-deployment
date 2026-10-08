@@ -11,7 +11,9 @@ Inputs:
 - the regridded interior (`interior_{single,pressure}_levels.zarr` from
   `regrid_dini.py`)
 - the boundary forecast in the IFS contract layout: `boundary.zarr` from
-  `regrid_dini.py` (DINI boundary) or a converted IFS forecast
+  `regrid_dini.py` (DINI boundary) or a converted IFS forecast. It is turned
+  into the valid-time layout of the training (ERA5) boundary first, see
+  `boundary_to_valid_time`
 
 Written to the inference workdir (neural-lam opens `{name}.zarr` next to each
 `{name}.yaml`):
@@ -19,6 +21,8 @@ Written to the inference workdir (neural-lam opens `{name}.zarr` next to each
   analysis_time .. analysis_time + forecast_duration (+ one step for
   `num_future_forcing_steps=1`), with the DANRA *training* statistics merged
   in (statistics are not computed from the inference data)
+- `{dini,ifs}_7deg_model1_config.input.zarr`: the boundary forecast in
+  valid-time layout
 - `{dini,ifs}_7deg_model1_config.{yaml,zarr}`: boundary datastore, cropped to
   the boundary points around the interior; normalised with the ERA5 training
   statistics in the artifact (`overload_stats_path`)
@@ -70,6 +74,113 @@ def ar_steps_for(forecast_duration):
     analysis time and +3h, the predictions at +6h .. +forecast_duration.
     """
     return int(forecast_duration / INTERIOR_STEP) - 1
+
+
+def _floor_boundary_step(t):
+    """The boundary time (00/06/12/18 UTC) at or before `t`."""
+    midnight = datetime.datetime.combine(t.date(), datetime.time())
+    return t - (t - midnight) % BOUNDARY_STEP
+
+
+def _time_range(start, end):
+    """Times from `start` to `end` (inclusive) every BOUNDARY_STEP."""
+    n = int((end - start) / BOUNDARY_STEP) + 1
+    return [start + i * BOUNDARY_STEP for i in range(n)]
+
+
+def boundary_times(analysis_time, forecast_duration):
+    """
+    The boundary (valid) times of a forecast: those the model uses, and the
+    times neural-lam requires the boundary datastore to cover.
+
+    For each prediction at time t (analysis_time + 6h .. + forecast_duration)
+    neural-lam takes the boundary at the last boundary time at or before t,
+    plus one boundary step either side (`num_{past,future}_boundary_steps=1`)
+    - in training the 00/06/12/18 UTC ERA5 times. neural-lam's coverage check
+    is more conservative: it requires the boundary to cover one boundary step
+    before the first interior time and after the last one (which includes
+    INTERIOR_EXTRA_STEPS). Those extra times are never used and are filled
+    with copies of the nearest used time.
+
+    Returns (used, required): lists of datetimes, `used` within `required`.
+    """
+    first_prediction = analysis_time + 2 * INTERIOR_STEP
+    last_prediction = analysis_time + forecast_duration
+    used = _time_range(
+        _floor_boundary_step(first_prediction) - BOUNDARY_STEP,
+        _floor_boundary_step(last_prediction) + BOUNDARY_STEP,
+    )
+    interior_end = last_prediction + INTERIOR_EXTRA_STEPS * INTERIOR_STEP
+    required_start = min(
+        used[0], _floor_boundary_step(analysis_time - BOUNDARY_STEP)
+    )
+    # the first boundary time at or after interior_end + one boundary step
+    required_end = _floor_boundary_step(interior_end + BOUNDARY_STEP)
+    if required_end < interior_end + BOUNDARY_STEP:
+        required_end += BOUNDARY_STEP
+    required = _time_range(required_start, max(required_end, used[-1]))
+    return used, required
+
+
+def boundary_to_valid_time(ds, analysis_time, forecast_duration):
+    """
+    Turn a boundary forecast in the IFS contract layout (`time` = cycle,
+    `prediction_timedelta` = lead time) into the valid-time layout of the ERA5
+    boundary the model was trained with (`time` = valid time, 6-hourly at
+    00/06/12/18 UTC), as read by the DINI/IFS boundary datastore configs.
+
+    The latest cycle at or before `analysis_time` is used. The times the
+    model uses (see `boundary_times`) must be among its valid times; the
+    extra times neural-lam's coverage check requires are copies of the
+    nearest used time.
+    """
+    used, required = boundary_times(analysis_time, forecast_duration)
+    cycles = ds.time.values[ds.time.values <= np.datetime64(analysis_time)]
+    if cycles.size == 0:
+        raise ValueError(
+            f"no boundary cycle at or before the analysis time "
+            f"{analysis_time} (have {ds.time.values})"
+        )
+    cycle = cycles.max()
+
+    time_dependent = [v for v in ds.data_vars if "time" in ds[v].dims]
+    ds_cycle = ds[time_dependent].sel(time=cycle).drop_vars("time")
+    valid_times = cycle + ds_cycle.prediction_timedelta.values
+    ds_cycle = (
+        ds_cycle.assign_coords(time=("prediction_timedelta", valid_times))
+        .swap_dims(prediction_timedelta="time")
+        .drop_vars("prediction_timedelta")
+    )
+
+    used_ns = np.array(used, dtype="datetime64[ns]")
+    missing = sorted(set(used_ns) - set(ds_cycle.time.values))
+    if missing:
+        raise ValueError(
+            f"the boundary cycle {cycle} has no data at "
+            f"{[str(t)[:16] for t in missing]}, needed for a "
+            f"{forecast_duration} forecast from {analysis_time} (boundary "
+            f"times {used[0]} .. {used[-1]}, 6-hourly at 00/06/12/18 UTC)"
+        )
+    # take each required time from the nearest used time
+    source_times = np.clip(
+        np.array(required, dtype="datetime64[ns]"), used_ns[0], used_ns[-1]
+    )
+    ds_valid = ds_cycle.sel(time=source_times).assign_coords(
+        time=np.array(required, dtype="datetime64[ns]")
+    )
+    ds_valid = xr.merge(
+        [ds_valid, ds.drop_vars(time_dependent + ["time"], errors="ignore")],
+        combine_attrs="override",
+    )
+    ds_valid = ds_valid.drop_vars("prediction_timedelta", errors="ignore")
+    padded = [t for t in required if t < used[0] or t > used[-1]]
+    ds_valid.attrs.update(
+        boundary_cycle=str(cycle)[:19],
+        boundary_times_used=f"{used[0]:%Y-%m-%dT%H:%M} .. "
+        f"{used[-1]:%Y-%m-%dT%H:%M}",
+        boundary_times_padded=", ".join(f"{t:%Y-%m-%dT%H:%M}" for t in padded),
+    )
+    return ds_valid
 
 
 SPLIT_NAMES = ["train", "val", "test"]
@@ -149,15 +260,30 @@ def _create_boundary_datastore(
     boundary_source,
     fp_boundary,
     fp_interior_config,
-    boundary_end,
+    analysis_time,
+    forecast_duration,
     workdir,
 ):
     name = configs.name(configs.boundary_datastore)
+    # the datastore config reads the boundary in the valid-time layout of the
+    # training (ERA5) boundary
+    ds_valid = boundary_to_valid_time(
+        xr.open_zarr(fp_boundary), analysis_time, forecast_duration
+    )
+    fp_valid = workdir / f"{name}.input.zarr"
+    ds_valid.to_zarr(fp_valid, mode="w", consolidated=True)
+    logger.info(
+        f"boundary ({boundary_source}) from cycle "
+        f"{ds_valid.attrs['boundary_cycle']}: valid times used "
+        f"{ds_valid.attrs['boundary_times_used']}, padded (unused) "
+        f"{ds_valid.attrs['boundary_times_padded']}"
+    )
+
     config = mdp.Config.from_yaml_file(
         artifact / "configs" / configs.boundary_datastore
     )
     for input_config in config.inputs.values():
-        input_config.path = str(Path(fp_boundary).resolve())
+        input_config.path = str(fp_valid.resolve())
     # crop around the (small) inference interior dataset, rather than the
     # training interior dataset. The path is resolved relative to the CWD by
     # mllam-data-prep, so make it absolute
@@ -169,15 +295,6 @@ def _create_boundary_datastore(
     _write_config(config, fp_config)
     ds = mdp.create_dataset(config=config)
 
-    valid_times = (
-        ds.analysis_time.values[:, None] + ds.elapsed_forecast_duration.values
-    )
-    needed = np.datetime64(boundary_end, "ns")
-    if valid_times.max() < needed:
-        raise ValueError(
-            f"boundary forecast ends at {valid_times.max()}, but must reach "
-            f"{needed}"
-        )
     n_missing = {v: int(ds[v].isnull().sum()) for v in ["forcing", "static"]}
     if any(n_missing.values()):
         raise ValueError(
@@ -185,9 +302,9 @@ def _create_boundary_datastore(
         )
     ds.to_zarr(workdir / f"{name}.zarr", mode="w", consolidated=True)
     logger.info(
-        f"boundary datastore ({boundary_source}): analysis time(s) "
-        f"{ds.analysis_time.values}, {ds.elapsed_forecast_duration.size} lead "
-        f"times, {ds.grid_index.size} grid points"
+        f"boundary datastore ({boundary_source}): {ds.time.size} times "
+        f"{str(ds.time.values[0])[:16]} .. {str(ds.time.values[-1])[:16]}, "
+        f"{ds.grid_index.size} grid points"
     )
     return fp_config
 
@@ -249,8 +366,6 @@ def create_inference_datasets(
         + forecast_duration
         + INTERIOR_EXTRA_STEPS * INTERIOR_STEP
     )
-    # one boundary step after the forecast for `num_future_boundary_steps=1`
-    boundary_end = analysis_time + forecast_duration + BOUNDARY_STEP
 
     fp_interior_config = _create_interior_datastore(
         artifact, configs, interior_dir, analysis_time, interior_end, workdir
@@ -261,7 +376,8 @@ def create_inference_datasets(
         boundary_source,
         boundary,
         fp_interior_config,
-        boundary_end,
+        analysis_time,
+        forecast_duration,
         workdir,
     )
     logger.info(

@@ -218,7 +218,27 @@ Original step description:
   - Writes `boundary.zarr`.
 - Fail if any boundary point falls outside the DINI domain. This **will** trip on the northern edge (boundary up to 71.5°N, DINI up to 69.9°N); see Open issues.
 
-### 5. `src/create_inference_dataset.py` — IMPLEMENTED, final check pending
+### 5. `src/create_inference_dataset.py` — DONE
+**Final check (2026-10-07), `dev-utils/check_inference_sample.py`:** neural-lam builds the forecast sample from the datastores of DINI 2026-10-01T00Z (PT6H) with the paper-model artifact:
+- initial states at 00Z and 03Z, target at 06Z;
+- boundary window 00/06/12Z with time deltas (−6, 0, +6) h, as in training;
+- all shapes as expected, all values finite;
+- standardised values unremarkable.
+
+**Finding: the boundary is now in valid-time layout (user decision).** neural-lam's *forecast*-boundary code path can't be used with one operational cycle:
+- it derives the cycle interval from ≥ 2 analysis times, and crashed on one;
+- it uses the cycle strictly before the init time, needing a lead time before the first boundary window;
+- its coverage check needs cycles up to the end of the interior data.
+
+That path was written for the paper's year-long IFS evaluation, which had many cycles.
+
+The boundary forecast is therefore turned into the **valid-time layout of the ERA5 training boundary**: `time` = valid time, 6-hourly at 00/06/12/18 UTC. This is done by `boundary_to_valid_time` in `create_inference_dataset.py`.
+- The DINI/IFS boundary datastore configs read this layout. The IFS converter contract (one cycle per zarr, `time` × `prediction_timedelta`) is unchanged; its required lead times are restated in the `ifs_7deg_model1_config.yaml` header.
+- neural-lam then picks windows exactly as in training. For each prediction at t, it uses the boundary time at or before t, ± 6 h. The deltas are always (−6, 0, +6) h, as in training without `--dynamic_time_deltas`.
+- The latest cycle at or before the analysis time is used.
+- neural-lam's coverage check is more conservative than the windows: it wants one step before the analysis time and after the last interior time. Those times are filled with copies of the nearest used time. They are recorded in the input zarr's attributes, and the check script asserts they're never used.
+- Consequence: with the **DINI boundary** (same run as the initial states), the analysis time must be **00/06/12/18 UTC**. A 03Z run needs the 00Z boundary, which isn't in its own forecast. With IFS, an older cycle is fine.
+
 Rewritten as an ANNA-specific CLI: `--artifact --interior-dir --boundary --boundary-source {dini,ifs} --analysis-time --forecast-duration --workdir`. It writes `danra_model1_config.{yaml,zarr}`, `{dini,ifs}_7deg_model1_config.{yaml,zarr}` and `config.yaml` (neural-lam) to the workdir:
 - **Interior:** inputs come from the regridded zarrs. The time range runs from the analysis time to analysis + duration + 2 steps, with train/val/test all equal to it. There's no `compute_statistics`; the DANRA *training* stats from the artifact are merged in (statistics variables only, the feature metadata describes the inference data).
 - **Boundary:** the config is used as-is with the input path set, and cropping points at the inference interior config by absolute path. The script checks that the lead times reach analysis + duration + 6 h.

@@ -14,6 +14,20 @@
 #   lsm -> land_sea_mask, orography * g -> geopotential_at_surface,
 #   `pressure` -> `level`, forecast `time` -> `time` + `prediction_timedelta`.
 #
+# As the boundary is taken from the same DINI run as the initial states, the
+# ANNA analysis time must be at 00/06/12/18 UTC (the boundary times are on
+# that 6-hourly grid, see below).
+#
+# VALID-TIME LAYOUT: this config doesn't read the forecast zarr directly.
+# `src/create_inference_dataset.py` first turns the forecast (one cycle) into a
+# series of valid times on the 6-hourly 00/06/12/18 UTC grid, the layout of the
+# ERA5 boundary the model was trained with, and points the inputs below at that
+# (dims `time` = valid time, `longitude`, `latitude`, `level`). neural-lam then
+# picks the boundary windows exactly as in training. Its forecast-boundary code
+# path can't be used with a single operational cycle (it needs earlier cycles
+# and cycles covering the whole forecast). See `boundary_to_valid_time` in
+# `src/create_inference_dataset.py`.
+#
 # Features are normalised with the ERA5 training statistics
 # (`overload_stats_path` in `7deg_config_dini.yaml`).
 #
@@ -30,17 +44,16 @@ dataset_version: v0.1.0
 output:
   variables:
     static: [grid_index, static_feature]
-    forcing: [analysis_time, elapsed_forecast_duration, grid_index, forcing_feature]
-  # no `coord_ranges`: `boundary.zarr` holds a single DINI cycle, all of which
-  # (all lead times) is used
+    forcing: [time, grid_index, forcing_feature]
+  # no `coord_ranges`: the valid-time input holds exactly the boundary times
+  # needed for one forecast
   chunking:
-    analysis_time: 1
-    elapsed_forecast_duration: 1
+    time: 1
   splitting:
     # neural-lam requires train/val/test splits to exist. They are made wide
-    # enough to contain any analysis time, and no statistics are computed as
+    # enough to contain any valid time, and no statistics are computed as
     # the ERA5 training statistics are used
-    dim: analysis_time
+    dim: time
     splits:
       train:
         start: 2000-01-01T00:00
@@ -58,8 +71,8 @@ output:
 
 inputs:
   dini_sl:
-    path: boundary.zarr
-    dims: [time, prediction_timedelta, longitude, latitude]
+    path: boundary_valid_time.zarr
+    dims: [time, longitude, latitude]
     variables:
       - mean_sea_level_pressure
       - 2m_temperature
@@ -67,46 +80,37 @@ inputs:
       - 10m_v_component_of_wind
       - surface_pressure
     derived_variables:
-      # derive variables to be used as forcings, evaluated at the valid time
-      # (analysis time + lead time)
+      # derive variables to be used as forcings, at the valid time
       toa_radiation:
         kwargs:
           time: ds_input.time
-          lead_time: ds_input.prediction_timedelta
           lat: ds_input.latitude
           lon: ds_input.longitude
         function: mllam_data_prep.ops.derive_variable.physical_field.calculate_toa_radiation
       hour_of_day_sin:
         kwargs:
           time: ds_input.time
-          lead_time: ds_input.prediction_timedelta
           component: sin
         function: mllam_data_prep.ops.derive_variable.time_components.calculate_hour_of_day
       hour_of_day_cos:
         kwargs:
           time: ds_input.time
-          lead_time: ds_input.prediction_timedelta
           component: cos
         function: mllam_data_prep.ops.derive_variable.time_components.calculate_hour_of_day
       day_of_year_sin:
         kwargs:
           time: ds_input.time
-          lead_time: ds_input.prediction_timedelta
           component: sin
         function: mllam_data_prep.ops.derive_variable.time_components.calculate_day_of_year
       day_of_year_cos:
         kwargs:
           time: ds_input.time
-          lead_time: ds_input.prediction_timedelta
           component: cos
         function: mllam_data_prep.ops.derive_variable.time_components.calculate_day_of_year
     dim_mapping:
-      analysis_time:
+      time:
         method: rename
         dim: time
-      elapsed_forecast_duration:
-        method: rename
-        dim: prediction_timedelta
       forcing_feature:
         method: stack_variables_by_var_name
         name_format: "{var_name}"
@@ -116,8 +120,8 @@ inputs:
     target_output_variable: forcing
 
   dini_pl:
-    path: boundary.zarr
-    dims: [time, prediction_timedelta, longitude, latitude, level]
+    path: boundary_valid_time.zarr
+    dims: [time, longitude, latitude, level]
     variables:
       geopotential:
         level:
@@ -144,12 +148,9 @@ inputs:
           values: [100, 200, 400, 600, 700, 850, 925, 1000,]
           units: hPa
     dim_mapping:
-      analysis_time:
+      time:
         method: rename
         dim: time
-      elapsed_forecast_duration:
-        method: rename
-        dim: prediction_timedelta
       forcing_feature:
         method: stack_variables_by_var_name
         dims: [level]
@@ -160,7 +161,7 @@ inputs:
     target_output_variable: forcing
 
   dini_static:
-    path: boundary.zarr
+    path: boundary_valid_time.zarr
     dims: [longitude, latitude]
     variables:
       - land_sea_mask

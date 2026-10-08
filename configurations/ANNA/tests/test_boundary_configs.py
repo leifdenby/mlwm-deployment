@@ -28,7 +28,14 @@ import yaml
 
 CONFIGS_DIR = Path(__file__).parent.parent / "configs"
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from create_inference_dataset import (  # noqa: E402
+    boundary_times,
+    boundary_to_valid_time,
+)
 from model_configs import model_configs  # noqa: E402
+
+FORECAST_ANALYSIS_TIME = "2026-09-26T12:00"
+FORECAST_DURATION = pd.Timedelta("6h").to_pytimedelta()
 
 LEVELS = [100, 200, 400, 600, 700, 850, 925, 1000]
 SURFACE_VARS = [
@@ -173,12 +180,18 @@ def boundary_datasets(tmp_path_factory):
 
     datasets = {}
     for name in ["ifs", "dini"]:
-        # the IFS/DINI configs are used as-is, only the input paths change
+        # the IFS/DINI configs are used as-is, only the input paths change.
+        # They read the forecast after conversion to valid-time layout
         ds = _make_forecast_contract_dataset(
-            analysis_time="2026-09-26T12:00", lead_hours=[0, 6, 12]
+            analysis_time=FORECAST_ANALYSIS_TIME, lead_hours=[0, 6, 12]
+        )
+        ds_valid = boundary_to_valid_time(
+            ds,
+            pd.Timestamp(FORECAST_ANALYSIS_TIME).to_pydatetime(),
+            FORECAST_DURATION,
         )
         fp = tmp_path / f"{name}.zarr"
-        ds.to_zarr(fp)
+        ds_valid.to_zarr(fp)
         datasets[name] = _create_boundary_dataset(name, fp)
 
     # training config covers 2000-2020, the synthetic data only a day
@@ -249,14 +262,11 @@ def test_boundary_features_match_training(boundary_datasets, name):
 @pytest.mark.parametrize("name", ["ifs", "dini"])
 def test_forecast_boundary_dims(boundary_datasets, name):
     ds = boundary_datasets[name]
-    # dim order is up to mllam-data-prep, neural-lam selects dims by name
-    assert set(ds.forcing.dims) == {
-        "analysis_time",
-        "elapsed_forecast_duration",
-        "grid_index",
-        "forcing_feature",
-    }
-    assert ds.elapsed_forecast_duration.size == 3
+    # same layout as the ERA5 training boundary: valid times
+    assert set(ds.forcing.dims) == set(boundary_datasets["era5"].forcing.dims)
+    assert "analysis_time" not in ds.dims
+    # 12Z + 6h forecast: boundary 06Z (padded) .. 06Z next day (padded)
+    assert ds.time.size == 5
     assert not bool(ds.forcing.isnull().any())
 
 
@@ -276,3 +286,102 @@ def test_model_configs_resolve(name):
     assert configs.boundary_stats_datastore == BOUNDARY_CONFIGS["era5"]
     for fn in [configs.interior_datastore, configs.boundary_datastore]:
         assert (CONFIGS_DIR / fn).exists()
+
+
+def _dt(s):
+    return pd.Timestamp(s).to_pydatetime()
+
+
+def _hours(h):
+    return pd.Timedelta(hours=h).to_pytimedelta()
+
+
+@pytest.mark.parametrize(
+    "analysis_time, duration_h, used, required",
+    [
+        # synoptic analysis time: the boundary times used start at it
+        (
+            "2026-10-01T00:00",
+            6,
+            ("00", "12"),
+            ("2026-09-30T18", "2026-10-01T18"),
+        ),
+        ("2026-10-01T00:00", 18, ("00", "2026-10-02T00"), None),
+        # 03Z: the first prediction (09Z) uses 00/06/12Z
+        ("2026-10-01T03:00", 6, ("00", "12"), None),
+        # forecast ending off the boundary grid (+9h -> 12Z): 06/12/18Z
+        ("2026-10-01T03:00", 9, ("00", "18"), None),
+    ],
+)
+def test_boundary_times(analysis_time, duration_h, used, required):
+    def full(t):
+        return _dt(t if len(t) > 2 else f"2026-10-01T{t}:00")
+
+    u, r = boundary_times(_dt(analysis_time), _hours(duration_h))
+    assert (u[0], u[-1]) == (full(used[0]), full(used[1]))
+    # 6-hourly at 00/06/12/18 UTC, used within required
+    assert all(t.hour % 6 == 0 and t.minute == 0 for t in r)
+    assert set(u) <= set(r)
+    # neural-lam's coverage check: one boundary step before the analysis time
+    # and after the last interior time (forecast + 2 interior steps)
+    t0 = _dt(analysis_time)
+    assert r[0] <= t0 - _hours(6)
+    assert r[-1] >= t0 + _hours(duration_h) + _hours(6) + _hours(6)
+    if required is not None:
+        assert (r[0], r[-1]) == (_dt(required[0]), _dt(required[1]))
+
+
+def test_boundary_to_valid_time_pads_with_copies():
+    ds = _make_forecast_contract_dataset(
+        analysis_time="2026-10-01T00:00", lead_hours=[0, 6, 12, 18]
+    )
+    ds_valid = boundary_to_valid_time(ds, _dt("2026-10-01T00:00"), _hours(6))
+    times = [str(t)[:13] for t in ds_valid.time.values]
+    assert times == [
+        "2026-09-30T18",
+        "2026-10-01T00",
+        "2026-10-01T06",
+        "2026-10-01T12",
+        "2026-10-01T18",
+    ]
+    t2m = ds_valid["2m_temperature"]
+    # padded ends are copies of the nearest used time; the used times are
+    # the forecast's own data, even where it has more lead times
+    np.testing.assert_array_equal(t2m.isel(time=0), t2m.isel(time=1))
+    np.testing.assert_array_equal(
+        t2m.isel(time=4),
+        ds["2m_temperature"].isel(time=0, prediction_timedelta=2),
+    )
+    np.testing.assert_array_equal(
+        t2m.isel(time=2),
+        ds["2m_temperature"].isel(time=0, prediction_timedelta=1),
+    )
+    assert ds_valid["land_sea_mask"].dims == ("latitude", "longitude")
+    assert ds_valid.attrs["boundary_times_padded"] == (
+        "2026-09-30T18:00, 2026-10-01T18:00"
+    )
+
+
+def test_boundary_to_valid_time_older_cycle():
+    # e.g. IFS: the 00Z cycle for a 06Z ANNA run
+    ds = _make_forecast_contract_dataset(
+        analysis_time="2026-10-01T00:00", lead_hours=list(range(0, 31, 6))
+    )
+    ds_valid = boundary_to_valid_time(ds, _dt("2026-10-01T06:00"), _hours(18))
+    assert ds_valid.attrs["boundary_cycle"] == "2026-10-01T00:00:00"
+    assert ds_valid.attrs["boundary_times_used"] == (
+        "2026-10-01T06:00 .. 2026-10-02T06:00"
+    )
+
+
+def test_boundary_to_valid_time_missing():
+    # DINI boundary from the 03Z run: no data at 00Z, which a 03Z forecast
+    # needs
+    ds = _make_forecast_contract_dataset(
+        analysis_time="2026-10-01T03:00", lead_hours=[0, 6, 12]
+    )
+    with pytest.raises(ValueError, match="has no data at"):
+        boundary_to_valid_time(ds, _dt("2026-10-01T03:00"), _hours(6))
+    # a cycle after the analysis time can't be used
+    with pytest.raises(ValueError, match="no boundary cycle"):
+        boundary_to_valid_time(ds, _dt("2026-10-01T00:00"), _hours(6))

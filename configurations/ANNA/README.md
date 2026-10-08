@@ -147,7 +147,7 @@ It's configured through environment variables:
 
 | Variable | Default | |
 |---|---|---|
-| `ANALYSIS_TIME` | (required) | DINI analysis time, e.g. `2026-10-01T00:00Z` |
+| `ANALYSIS_TIME` | (required) | DINI analysis time, e.g. `2026-10-01T00:00Z`; 00/06/12/18 UTC with the DINI boundary |
 | `FORECAST_DURATION` | `PT18H` | multiple of 3 h, between 6 h and DINI forecast length − 6 h (30 h for a 36 h DINI run) |
 | `BOUNDARY_SOURCE` | `dini` | `dini` or `ifs` |
 | `DINI_ROOT` | `s3://harmonie-zarr/dini/control/{analysis}/` | DINI forecast zarrs |
@@ -189,6 +189,14 @@ T+3 h. The conventions are DANRA's:
   the preferred boundary source once the IFS zarr is available.
 
   ![Boundary points vs the DINI domain](docs/anna_boundary_vs_dini.png)
+
+- **DINI boundary: 00/06/12/18 UTC only.** The model was trained with a
+  6-hourly ERA5 boundary at 00/06/12/18 UTC. The boundary is therefore given
+  to neural-lam as valid times on that grid, which for each prediction uses
+  the last boundary time at or before it ± 6 h. A forecast from, say, 03Z
+  needs the boundary at 00Z, which its own DINI run doesn't have. IFS
+  boundaries can come from an older cycle (the latest at or before the
+  analysis time).
 
 - **DINI zarr retention** is two weeks. Keep regridded development cases
   locally in `dev-data/` (gitignored).

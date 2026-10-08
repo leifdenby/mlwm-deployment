@@ -8,6 +8,16 @@
 # (`era_7deg_model1_config.yaml`) and is normalised with the ERA5 training
 # statistics (`overload_stats_path` in `7deg_config_ifs.yaml`).
 #
+# VALID-TIME LAYOUT: this config doesn't read the forecast zarr directly.
+# `src/create_inference_dataset.py` first turns the forecast (one cycle) into a
+# series of valid times on the 6-hourly 00/06/12/18 UTC grid, the layout of the
+# ERA5 boundary the model was trained with, and points the inputs below at that
+# (dims `time` = valid time, `longitude`, `latitude`, `level`). neural-lam then
+# picks the boundary windows exactly as in training. Its forecast-boundary code
+# path can't be used with a single operational cycle (it needs earlier cycles
+# and cycles covering the whole forecast). See `boundary_to_valid_time` in
+# `src/create_inference_dataset.py`.
+#
 # Differences from the neural-lam-dev reference config:
 # - statics (`land_sea_mask`, `geopotential_at_surface`) are taken from IFS
 #   itself rather than from ERA5, so the operational setup has one source
@@ -18,14 +28,23 @@
 # =============================================================================
 # CONTRACT FOR THE IFS GRIB -> ZARR CONVERSION
 # =============================================================================
-# One zarr store per IFS cycle (e.g. `.../ifs/{YYYY-MM-DDTHHMMSSZ}/ifs.zarr`,
-# the path below is a placeholder overridden at run time) containing:
+# One zarr store per IFS cycle (e.g. `.../ifs/{YYYY-MM-DDTHHMMSSZ}/ifs.zarr`)
+# containing the variables below. ANNA turns it into the valid-time input of
+# this config (see above):
 #
 # Coordinates
 #   time                  datetime64, analysis/reference time of the cycle
-#                         (length 1 is fine; 00/12 UTC cycles suffice)
-#   prediction_timedelta  timedelta64, lead time. From 0h to at least the ANNA
-#                         forecast length + 6h, every 6h (3h also fine)
+#                         (length 1 is fine; 00/12 UTC cycles suffice). The
+#                         latest cycle at or before the ANNA analysis time is
+#                         used, so it may be older than the analysis time
+#   prediction_timedelta  timedelta64, lead time, every 6h (3h also fine).
+#                         The valid times (cycle + lead time) must include the
+#                         00/06/12/18 UTC times from the last one at or before
+#                         the ANNA analysis time to 6h after the last one at
+#                         or before the end of the ANNA forecast. E.g. for a
+#                         06Z ANNA run with an 18h forecast from the 00Z
+#                         cycle: valid times 06Z..06Z next day, lead times
+#                         6h..30h
 #   latitude, longitude   1D, regular 0.25 deg grid on the ERA5 grid points
 #                         (multiples of 0.25 deg): lat 40.0..72.0 and
 #                         lon -27.0..39.5. The 18014 boundary points ANNA was
@@ -84,17 +103,16 @@ dataset_version: v0.1.0
 output:
   variables:
     static: [grid_index, static_feature]
-    forcing: [analysis_time, elapsed_forecast_duration, grid_index, forcing_feature]
-  # no `coord_ranges`: each input store holds a single IFS cycle, all of which
-  # (all lead times) is used
+    forcing: [time, grid_index, forcing_feature]
+  # no `coord_ranges`: the valid-time input holds exactly the boundary times
+  # needed for one forecast
   chunking:
-    analysis_time: 1
-    elapsed_forecast_duration: 1
+    time: 1
   splitting:
     # neural-lam requires train/val/test splits to exist. They are made wide
-    # enough to contain any analysis time, and no statistics are computed as
+    # enough to contain any valid time, and no statistics are computed as
     # the ERA5 training statistics are used
-    dim: analysis_time
+    dim: time
     splits:
       train:
         start: 2000-01-01T00:00
@@ -112,8 +130,8 @@ output:
 
 inputs:
   ifs_sl:
-    path: ifs.zarr
-    dims: [time, prediction_timedelta, longitude, latitude]
+    path: boundary_valid_time.zarr
+    dims: [time, longitude, latitude]
     variables:
       - mean_sea_level_pressure
       - 2m_temperature
@@ -121,46 +139,37 @@ inputs:
       - 10m_v_component_of_wind
       - surface_pressure
     derived_variables:
-      # derive variables to be used as forcings, evaluated at the valid time
-      # (analysis time + lead time)
+      # derive variables to be used as forcings, at the valid time
       toa_radiation:
         kwargs:
           time: ds_input.time
-          lead_time: ds_input.prediction_timedelta
           lat: ds_input.latitude
           lon: ds_input.longitude
         function: mllam_data_prep.ops.derive_variable.physical_field.calculate_toa_radiation
       hour_of_day_sin:
         kwargs:
           time: ds_input.time
-          lead_time: ds_input.prediction_timedelta
           component: sin
         function: mllam_data_prep.ops.derive_variable.time_components.calculate_hour_of_day
       hour_of_day_cos:
         kwargs:
           time: ds_input.time
-          lead_time: ds_input.prediction_timedelta
           component: cos
         function: mllam_data_prep.ops.derive_variable.time_components.calculate_hour_of_day
       day_of_year_sin:
         kwargs:
           time: ds_input.time
-          lead_time: ds_input.prediction_timedelta
           component: sin
         function: mllam_data_prep.ops.derive_variable.time_components.calculate_day_of_year
       day_of_year_cos:
         kwargs:
           time: ds_input.time
-          lead_time: ds_input.prediction_timedelta
           component: cos
         function: mllam_data_prep.ops.derive_variable.time_components.calculate_day_of_year
     dim_mapping:
-      analysis_time:
+      time:
         method: rename
         dim: time
-      elapsed_forecast_duration:
-        method: rename
-        dim: prediction_timedelta
       forcing_feature:
         method: stack_variables_by_var_name
         name_format: "{var_name}"
@@ -170,8 +179,8 @@ inputs:
     target_output_variable: forcing
 
   ifs_pl:
-    path: ifs.zarr
-    dims: [time, prediction_timedelta, longitude, latitude, level]
+    path: boundary_valid_time.zarr
+    dims: [time, longitude, latitude, level]
     variables:
       geopotential:
         level:
@@ -198,12 +207,9 @@ inputs:
           values: [100, 200, 400, 600, 700, 850, 925, 1000,]
           units: hPa
     dim_mapping:
-      analysis_time:
+      time:
         method: rename
         dim: time
-      elapsed_forecast_duration:
-        method: rename
-        dim: prediction_timedelta
       forcing_feature:
         method: stack_variables_by_var_name
         dims: [level]
@@ -214,7 +220,7 @@ inputs:
     target_output_variable: forcing
 
   ifs_static:
-    path: ifs.zarr
+    path: boundary_valid_time.zarr
     dims: [longitude, latitude]
     variables:
       - land_sea_mask
