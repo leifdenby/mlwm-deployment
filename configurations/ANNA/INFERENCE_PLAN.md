@@ -285,6 +285,28 @@ Original step description:
 
   These are the size of the differences between two good short-range forecasts, with no sign of unit, wind-rotation or normalisation errors (those would give errors of several K or tens of m/s). Biases are small everywhere. The upper-level winds and r differ most, as expected for a 2.5 km model against DINI.
 - Reruns: `SKIP_COMPLETED=true` with the same workdir starts at the forecast.
+
+**PT30H (2026-10-08),** the longest forecast a 36 h DINI run allows (DINI cycles are all T+0..36 h, hourly). Same case and machine, run end to end in 11 min:
+- regridding 6 min (13 interior + 6 boundary steps); peak memory (sampled) 49 GB, including 28 GB on the GPU.
+- The first 3 steps are identical to the PT12H run (deterministic).
+- neural-lam's step losses 2.1, 3.3, 3.8, 4.2, 4.5, 4.8, 4.8, 6.0, 5.5.
+- Differences from DINI by lead time (RMSE; T+6 → T+18 → T+30 h):
+
+  | | T+6 | T+18 | T+30 |
+  |---|---|---|---|
+  | t2m (K) | 0.46 | 0.77 | 1.21 (bias −0.56) |
+  | MSLP (Pa) | 24 | 64 | 72 (bias +47) |
+  | u10m (m/s) | 0.87 | 1.0 | 1.2 |
+  | t850 (K) | 0.57 | 0.84 | 0.74 |
+  | z600 (m²/s²) | 23 | 41 | 57 |
+  | u200 (m/s) | 2.1 | 3.9 | 3.0 (bias +2.1) |
+  | r700 | 0.13 | 0.15 | 0.20 (bias −0.04) |
+
+  The differences grow slowly and stay at the size of differences between two short-range forecasts. There's no blow-up, though there are slow drifts: t2m cools (−0.56 K), MSLP rises (+0.5 hPa), 700 hPa dries and the upper-level wind speeds up.
+- `check_forecast_output.py` flags one range: **net short-wave `swavr0m` down to −64 W/m²**. At night most points are a few W/m² below 0 (the model doesn't enforce SW ≥ 0). The strongest negatives are over the western Norwegian mountains (60–61°N, 6–7°E); < 1% of points are below −20 W/m². This is a model artefact, not a pipeline error. It could be clipped to ≥ 0 in `convert_output.py` if users need that.
+- **Regridding speed:** the regrid process uses ~27% of one CPU and waits on S3, reading one 24 MB (5 MB compressed) DINI chunk at a time.
+  - A benchmark of one time step (55 fields): serial 16.6 s; one concurrent `dask.compute` 11.0 s (1.5×).
+  - That's about 25 MB/s compressed, the limit of this machine's **WiFi** link (its Ethernet ports are down). On a wired or in-AWS host the concurrent read should gain much more.
 - **Viewer (Gridlook, dmidev.org/dini) ran out of memory** on the first outputs. This wasn't the chunking: ANNA's fields are 1.9 MB chunks, against DINI's 24 MB. Without a `grid_mapping`, Gridlook takes 3D fields as a regular lat/lon grid, so it read the 1D x/y (Lambert metres, up to ±2·10⁶) as degrees. `convert_output.py` now writes the grid as DINI does: x/y/lat/lon CF attrs, a `danra_projection` grid mapping (CF Lambert parameters and WKT, from `extra.projection` of `danra_model1_config.yaml`) named by every field, `coordinates: lat lon`, and time in seconds since 1970. Projecting lat/lon with it reproduces x/y to < 1e-8 m. DANRA's own `danra_projection` has wrong CF parameters (central meridian 0.025, origin latitude 0.0567; its WKT is right), so it isn't copied.
 - The outputs of this run are in `s3://anna-forecasts/2026-10-01T000000Z/{single,pressure}_levels.zarr` (public read; for the viewer the bucket needs the same CORS rule as `harmonie-zarr`).
 
