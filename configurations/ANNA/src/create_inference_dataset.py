@@ -66,6 +66,11 @@ BOUNDARY_STEP = datetime.timedelta(hours=6)
 # conservative than the data a sample actually uses (same as in
 # regrid_dini.py)
 INTERIOR_EXTRA_STEPS = 2
+# shortest forecast: neural-lam's ARModel (when loading the checkpoint) builds
+# a WeatherDataset per split with its default `ar_steps=3`, which needs
+# 2 + 3 + 1 + 1 interior time steps (see INTERIOR_EXTRA_STEPS), i.e. a
+# forecast of at least 12h. Shorter forecasts fail in train_model
+MIN_FORECAST_DURATION = datetime.timedelta(hours=12)
 
 
 def ar_steps_for(forecast_duration):
@@ -352,14 +357,14 @@ def create_inference_datasets(
     configs = model_configs(artifact / "configs", boundary_source)
     logger.info(f"configs for the {boundary_source} boundary: {configs}")
     # the initial states are at analysis_time and +3h, so the first prediction
-    # is at +6h
+    # is at +6h; see MIN_FORECAST_DURATION for the minimum
     if (
-        forecast_duration < 2 * INTERIOR_STEP
+        forecast_duration < MIN_FORECAST_DURATION
         or forecast_duration % INTERIOR_STEP
     ):
         raise ValueError(
             f"forecast duration must be a multiple of {INTERIOR_STEP} and at "
-            f"least {2 * INTERIOR_STEP}"
+            f"least {MIN_FORECAST_DURATION}, got {forecast_duration}"
         )
     interior_end = (
         analysis_time

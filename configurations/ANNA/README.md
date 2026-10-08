@@ -148,7 +148,7 @@ It's configured through environment variables:
 | Variable | Default | |
 |---|---|---|
 | `ANALYSIS_TIME` | (required) | DINI analysis time, e.g. `2026-10-01T00:00Z`; 00/06/12/18 UTC with the DINI boundary |
-| `FORECAST_DURATION` | `PT18H` | multiple of 3 h, between 6 h and DINI forecast length − 6 h (30 h for a 36 h DINI run) |
+| `FORECAST_DURATION` | `PT18H` | multiple of 3 h, between 12 h (neural-lam needs that to load the model) and DINI forecast length − 6 h (30 h for a 36 h DINI run) |
 | `BOUNDARY_SOURCE` | `dini` | `dini` or `ifs` |
 | `DINI_ROOT` | `s3://harmonie-zarr/dini/control/{analysis}/` | DINI forecast zarrs |
 | `IFS_BOUNDARY_PATH` | | IFS forecast zarr, required for `BOUNDARY_SOURCE=ifs` |

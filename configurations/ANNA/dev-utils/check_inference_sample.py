@@ -104,6 +104,17 @@ def main():
         excluded_intervals=config.training.excluded_intervals,
     )
     data_module.setup(stage="test")
+
+    # neural-lam's ARModel also builds a WeatherDataset per split (with the
+    # default ar_steps and without boundary) when the checkpoint is loaded;
+    # these must have at least one sample too
+    from neural_lam.weather_dataset import WeatherDataset
+
+    for split in ("train", "val", "test"):
+        WeatherDataset(
+            datastore=datastore, datastore_boundary=None, split=split
+        )
+    print("model helper datasets (default ar_steps, all splits): OK")
     dataset = data_module.test_dataset
     problems = []
 

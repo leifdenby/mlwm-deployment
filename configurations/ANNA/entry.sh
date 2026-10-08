@@ -20,7 +20,9 @@
 # Configuration through environment variables:
 #   ANALYSIS_TIME      analysis time of the DINI forecast, ISO8601, e.g.
 #                      2026-10-01T00:00Z (required)
-#   FORECAST_DURATION  ISO8601 duration, multiple of 3h, >= PT6H (default PT18H).
+#   FORECAST_DURATION  ISO8601 duration, multiple of 3h, >= PT12H (default PT18H).
+#                      The first prediction is at +6h; neural-lam needs at least
+#                      12h to load the model (see create_inference_dataset.py).
 #                      The DINI forecast must cover FORECAST_DURATION + 6h, so
 #                      at most PT30H for a 36h DINI run
 #   BOUNDARY_SOURCE    "dini" (default) or "ifs"
@@ -30,6 +32,11 @@
 #   INFERENCE_WORKDIR  working directory (default ./inference_workdir)
 #   INFERENCE_ARTIFACT_PATH  inference artifact (default ./inference_artifact)
 #   MLWM_DEBUGGER      set to "ipdb" to debug the python steps on exceptions
+#   SKIP_COMPLETED     "true" to skip the regridding, datastore and graph steps
+#                      that already completed in INFERENCE_WORKDIR (marked by
+#                      a `.completed` file), e.g. to rerun only the forecast.
+#                      Only use with the same ANALYSIS_TIME, FORECAST_DURATION
+#                      and BOUNDARY_SOURCE as the completed run
 #
 # Outputs: ${INFERENCE_WORKDIR}/outputs/{single_levels,pressure_levels}.zarr
 
@@ -40,20 +47,22 @@ if [ -f .env ] ; then
     set -a && source .env && set +a
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 USE_UV=${USE_UV:-true}
 if [ "$USE_UV" = true ] ; then
-    PYTHON="uv run python"
+    # the ANNA project explicitly, as the forecast step runs in the workdir
+    PYTHON="uv run --project ${SCRIPT_DIR} python"
 else
     PYTHON="python"
 fi
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${ANALYSIS_TIME:?ANALYSIS_TIME must be set, e.g. 2026-10-01T00:00Z}"
 FORECAST_DURATION=${FORECAST_DURATION:-PT18H}
 BOUNDARY_SOURCE=${BOUNDARY_SOURCE:-dini}
 INFERENCE_WORKDIR=${INFERENCE_WORKDIR:-./inference_workdir}
 INFERENCE_ARTIFACT_PATH=${INFERENCE_ARTIFACT_PATH:-./inference_artifact}
+SKIP_COMPLETED=${SKIP_COMPLETED:-false}
 
 mkdir -p "${INFERENCE_WORKDIR}"
 WORKDIR="$(cd "${INFERENCE_WORKDIR}" && pwd)"
@@ -75,10 +84,10 @@ DINI_ROOT=${DINI_ROOT:-"s3://harmonie-zarr/dini/control/${ANALYSIS_COMPACT}/"}
 # number of autoregressive steps: the initial states are at the analysis time
 # and +3h, the predictions at +6h .. +FORECAST_DURATION
 if [[ "${FORECAST_DURATION}" =~ ^PT([0-9]+)H$ ]] && (( BASH_REMATCH[1] % 3 == 0 )) \
-        && (( BASH_REMATCH[1] >= 6 )) ; then
+        && (( BASH_REMATCH[1] >= 12 )) ; then
     AR_STEPS=$(( BASH_REMATCH[1] / 3 - 1 ))
 else
-    echo "ERROR: FORECAST_DURATION must be PT{N}H with N a multiple of 3 and >= 6, got ${FORECAST_DURATION}"
+    echo "ERROR: FORECAST_DURATION must be PT{N}H with N a multiple of 3 and >= 12, got ${FORECAST_DURATION}"
     exit 1
 fi
 
@@ -110,23 +119,41 @@ if torch.cuda.is_available():
     print("device:", torch.cuda.get_device_name(0))
 PY
 
+# steps that completed write a marker file in their output directory, which
+# SKIP_COMPLETED=true uses to skip them
+completed() {
+    [ "${SKIP_COMPLETED}" = true ] && [ -f "$1/.completed" ] \
+        && echo "Skipping $2: already completed in $1"
+}
+mark_completed() {
+    echo "${ANALYSIS_ISO} ${FORECAST_DURATION} ${BOUNDARY_SOURCE}" > "$1/.completed"
+}
+
 ## 1. regrid DINI
-${PYTHON} "${SCRIPT_DIR}/src/regrid_dini.py" regrid \
-    --dini-root "${DINI_ROOT}" \
-    --danra-grid "${ARTIFACT}/grids/danra_model1_config.grid.zarr" \
-    --forecast-duration "${FORECAST_DURATION}" \
-    --output "${WORKDIR}/inputs" \
-    ${REGRID_BOUNDARY_ARGS[@]+"${REGRID_BOUNDARY_ARGS[@]}"}
+if ! completed "${WORKDIR}/inputs" "regridding" ; then
+    rm -f "${WORKDIR}/inputs/.completed"
+    ${PYTHON} "${SCRIPT_DIR}/src/regrid_dini.py" regrid \
+        --dini-root "${DINI_ROOT}" \
+        --danra-grid "${ARTIFACT}/grids/danra_model1_config.grid.zarr" \
+        --forecast-duration "${FORECAST_DURATION}" \
+        --output "${WORKDIR}/inputs" \
+        ${REGRID_BOUNDARY_ARGS[@]+"${REGRID_BOUNDARY_ARGS[@]}"}
+    mark_completed "${WORKDIR}/inputs"
+fi
 
 ## 2. inference datastores and neural-lam config
-${PYTHON} "${SCRIPT_DIR}/src/create_inference_dataset.py" \
-    --artifact "${ARTIFACT}" \
-    --interior-dir "${WORKDIR}/inputs" \
-    --boundary "${BOUNDARY_PATH}" \
-    --boundary-source "${BOUNDARY_SOURCE}" \
-    --analysis-time "${ANALYSIS_ISO}" \
-    --forecast-duration "${FORECAST_DURATION}" \
-    --workdir "${WORKDIR}/datastores"
+if ! completed "${WORKDIR}/datastores" "the inference datastores" ; then
+    rm -f "${WORKDIR}/datastores/.completed"
+    ${PYTHON} "${SCRIPT_DIR}/src/create_inference_dataset.py" \
+        --artifact "${ARTIFACT}" \
+        --interior-dir "${WORKDIR}/inputs" \
+        --boundary "${BOUNDARY_PATH}" \
+        --boundary-source "${BOUNDARY_SOURCE}" \
+        --analysis-time "${ANALYSIS_ISO}" \
+        --forecast-duration "${FORECAST_DURATION}" \
+        --workdir "${WORKDIR}/datastores"
+    mark_completed "${WORKDIR}/datastores"
+fi
 NL_CONFIG="${WORKDIR}/datastores/config.yaml"
 
 ## the model (graph recipe, train_model arguments, checkpoint) is described in
@@ -154,10 +181,14 @@ if [ ! -f "${CHECKPOINT}" ] ; then
 fi
 
 ## 3. graph (written to datastores/graphs/)
-${PYTHON} -m neural_lam.build_rectangular_graph \
-    --config_path "${NL_CONFIG}" \
-    --graph_name "${GRAPH_NAME}" \
-    "${GRAPH_BUILD_ARGS[@]}"
+GRAPH_DIR="${WORKDIR}/datastores/graphs/${GRAPH_NAME}"
+if ! completed "${GRAPH_DIR}" "the graph" ; then
+    ${PYTHON} -m neural_lam.build_rectangular_graph \
+        --config_path "${NL_CONFIG}" \
+        --graph_name "${GRAPH_NAME}" \
+        "${GRAPH_BUILD_ARGS[@]}"
+    mark_completed "${GRAPH_DIR}"
+fi
 
 ## 4. forecast
 # - wandb offline (disabled crashes when saving the metric plots); neural-lam

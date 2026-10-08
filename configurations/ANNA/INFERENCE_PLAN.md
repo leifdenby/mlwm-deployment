@@ -267,7 +267,15 @@ Original step description:
 - Merge the training stats into the created dataset in the script. The pinned mdp's `create_dataset()` has no `ds_stats` argument (step 2).
 - Write every config with `to_yaml_file(..., sort_keys=False)`, or the feature order changes (step 2).
 
-### 6. `entry.sh`: add graph, eval and back-transform
+### 6. `entry.sh`: add graph, eval and back-transform — IN PROGRESS
+**Status (2026-10-08):** `entry.sh` runs regrid → datastores → graph → `train_model --eval test` → `convert_output.py`. The model arguments, graph and checkpoint come from `model.yaml`. The old gefion-1 arguments below are superseded.
+
+First runs on DINI 2026-10-01T00Z, laptop CPU:
+- **PT6H failed while loading the model.** neural-lam's `ARModel` builds a `WeatherDataset` per split with the default `ar_steps=3`, which needs 7 interior time steps. **The minimum forecast is therefore 12 h.** `entry.sh` and `create_inference_dataset.py` enforce this, and `dev-utils/check_inference_sample.py` now builds those datasets too.
+- **PT12H:** regridding (~24 min on the laptop) and the datastores worked: 7 interior steps and 6 valid-time boundary steps. It was stopped in the graph/forecast stage when the laptop ran out of memory. The model runs on all 464,721 DANRA points, so it needs a bigger machine; continue on the DGX Spark.
+- `entry.sh` now always uses the ANNA uv project, because the forecast step runs in the workdir. `SKIP_COMPLETED=true` skips stages already completed in the workdir.
+- `dev-utils/check_forecast_output.py` checks the outputs: lead times, finiteness, physical ranges, and differences from DINI at the same valid times.
+
 - `build_rectangular_graph` with the recipe above. Cache the graph in the image, since it's deterministic.
 - `train_model --eval test --model hi_lam --graph_name 7deg_rect_hi3 --hidden_dim 300 --hidden_dim_grid 150 --time_delta_enc_dim 32 --processor_layers 2 --num_past_forcing_steps 1 --num_future_forcing_steps 1 --num_past_boundary_steps 1 --num_future_boundary_steps 1 --ar_steps_eval N --load inference_artifact/checkpoint.pkl --save_eval_to_zarr_path ...`
 - `recreate_inputs` → `single_levels.zarr` / `pressure_levels.zarr`.
