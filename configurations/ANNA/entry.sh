@@ -224,6 +224,7 @@ fi
 ${PYTHON} "${SCRIPT_DIR}/src/convert_output.py" \
     --prediction "${PREDICTION}" \
     --danra-grid "${ARTIFACT}/grids/danra_model1_config.grid.zarr" \
+    --interior-config "${ARTIFACT}/configs/danra_model1_config.yaml" \
     --analysis-time "${ANALYSIS_ISO}" \
     --output-dir "${WORKDIR}/outputs"
 

@@ -181,6 +181,11 @@ T+3 h. The conventions are DANRA's:
 - `lwavr0m`/`swavr0m` are net surface radiation fluxes
 - `tw` is geometric vertical velocity (m/s)
 
+The grid is described with CF metadata as in the DINI zarrs: `x`/`y` in
+metres of the DANRA Lambert projection, 2D `lat`/`lon`, and a
+`danra_projection` grid mapping variable named by every field's
+`grid_mapping`. Viewers such as Gridlook need it to recognise the grid.
+
 ## Known limitations
 
 - **DINI boundary.** 25% of the model's boundary points (4,573 of 18,014) lie

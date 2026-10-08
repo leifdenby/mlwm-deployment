@@ -15,17 +15,29 @@ DANRA grid in the inference artifact). Conventions are those of DANRA/ANNA:
 winds are relative to the DANRA (Lambert) grid and relative humidity is a
 fraction (0-1).
 
+The grid is described with CF metadata as in the DINI zarrs: x/y in
+projection metres, and a `danra_projection` grid mapping variable (CF Lambert
+parameters and WKT) named by every field's `grid_mapping`. The projection
+comes from the interior datastore config (`extra.projection`, as neural-lam
+reads it). Viewers such as Gridlook need it to recognise the Lambert grid;
+without it they take x/y for lon/lat in degrees. NB: DANRA's own
+`danra_projection` has wrong CF parameters (e.g. central meridian 0.025
+instead of 25), so it isn't copied.
+
 Usage:
     python convert_output.py --prediction inference_output.zarr \\
         --danra-grid inference_artifact/grids/danra_model1_config.grid.zarr \\
+        --interior-config inference_artifact/configs/danra_model1_config.yaml \\
         --analysis-time 2026-10-01T00:00 --output-dir outputs/
 """
 import argparse
 import re
 from pathlib import Path
 
+import cartopy.crs as ccrs
 import numpy as np
 import xarray as xr
+import yaml
 from loguru import logger
 
 SINGLE_LEVEL_VARS = [
@@ -63,9 +75,27 @@ NOTES = {
     "swavr0m": "net surface short-wave radiation flux",
     "tw": "geometric vertical velocity",
 }
+GRID_MAPPING = "danra_projection"
 
 
-def convert(ds_pred, ds_grid, analysis_time):
+def projection_cf_attrs(interior_config):
+    """
+    CF grid mapping attributes (incl. `crs_wkt`) of the projection in an mdp
+    datastore config's `extra.projection`, built as neural-lam does.
+    """
+    with open(interior_config) as f:
+        projection = yaml.safe_load(f)["extra"]["projection"]
+    kwargs = dict(projection["kwargs"])
+    if "globe" in kwargs:
+        kwargs["globe"] = ccrs.Globe(**kwargs["globe"])
+    crs = getattr(ccrs, projection["class_name"])(**kwargs)
+    return {
+        k: list(v) if isinstance(v, tuple) else v
+        for k, v in crs.to_cf().items()
+    }
+
+
+def convert(ds_pred, ds_grid, analysis_time, projection_attrs):
     """Split the predicted state features into single/pressure level datasets."""
     if ds_pred.start_time.size != 1:
         raise ValueError(
@@ -81,11 +111,12 @@ def convert(ds_pred, ds_grid, analysis_time):
     )
     features = [str(f) for f in da.state_feature.values]
 
+    # with the grid's CF attrs (x/y: projection_{x,y}_coordinate in m)
     coords = dict(
-        x=ds_grid.x.values,
-        y=ds_grid.y.values,
-        lat=(("y", "x"), ds_grid.lat.values),
-        lon=(("y", "x"), ds_grid.lon.values),
+        x=("x", ds_grid.x.values, ds_grid.x.attrs),
+        y=("y", ds_grid.y.values, ds_grid.y.attrs),
+        lat=(("y", "x"), ds_grid.lat.values, ds_grid.lat.attrs),
+        lon=(("y", "x"), ds_grid.lon.values, ds_grid.lon.attrs),
     )
     attrs = dict(
         source="ANNA forecast (DANRA ML LAM model, arXiv:2504.09340)",
@@ -134,8 +165,15 @@ def convert(ds_pred, ds_grid, analysis_time):
         ds.attrs = attrs
         for v in ds.data_vars:
             ds[v].attrs["units"] = UNITS[v]
+            ds[v].attrs["grid_mapping"] = GRID_MAPPING
+            # neural-lam's encoding (`coordinates: time`) would keep xarray
+            # from writing `coordinates: lat lon` on the variable
+            ds[v].encoding.pop("coordinates", None)
             if v in NOTES:
                 ds[v].attrs["comment"] = NOTES[v]
+        ds[GRID_MAPPING] = xr.DataArray(0, attrs=projection_attrs)
+        # time units as in the DINI zarrs
+        ds.time.encoding["units"] = "seconds since 1970-01-01"
     return ds_sl, ds_pl
 
 
@@ -146,13 +184,24 @@ def main():
     )
     parser.add_argument("--prediction", required=True, type=Path)
     parser.add_argument("--danra-grid", required=True, type=Path)
+    parser.add_argument(
+        "--interior-config",
+        required=True,
+        type=Path,
+        help="interior (DANRA) datastore config, for the grid's projection",
+    )
     parser.add_argument("--analysis-time", required=True, type=np.datetime64)
     parser.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args()
 
     ds_pred = xr.open_zarr(args.prediction)
     ds_grid = xr.open_zarr(args.danra_grid).load()
-    ds_sl, ds_pl = convert(ds_pred, ds_grid, args.analysis_time)
+    ds_sl, ds_pl = convert(
+        ds_pred,
+        ds_grid,
+        args.analysis_time,
+        projection_cf_attrs(args.interior_config),
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for name, ds in [("single_levels", ds_sl), ("pressure_levels", ds_pl)]:
         fp = args.output_dir / f"{name}.zarr"
