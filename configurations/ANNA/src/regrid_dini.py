@@ -242,7 +242,9 @@ class BilinearInterpolator:
             output_core_dims=[list(out_dims)],
             dask="parallelized",
             output_dtypes=[np.float64],
-            dask_gufunc_kwargs=dict(output_sizes=dict(zip(out_dims, self.shape))),
+            dask_gufunc_kwargs=dict(
+                output_sizes=dict(zip(out_dims, self.shape))
+            ),
         )
 
 
@@ -312,7 +314,9 @@ def _regrid_interior(
     def _winds(ds, u_name, v_name):
         u_e, v_e = grid_to_earth(ds[u_name], ds[v_name], theta_dini)
         return earth_to_grid(
-            interp.apply(u_e, out_dims), interp.apply(v_e, out_dims), theta_danra
+            interp.apply(u_e, out_dims),
+            interp.apply(v_e, out_dims),
+            theta_danra,
         )
 
     sl = {v: interp.apply(sl_in[v], out_dims) for v in INTERIOR_SL_VARS}

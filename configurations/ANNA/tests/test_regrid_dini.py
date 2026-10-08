@@ -110,7 +110,9 @@ def test_bilinear_leading_dims_and_lazy():
 def test_smooth_leading_dims_and_lazy():
     da = _fields((3, 2, 20, 30))
     # each 2D field is smoothed on its own, not across time/levels
-    expected = np.array([[rd.smooth(f2d, 5) for f2d in f3d] for f3d in da.values])
+    expected = np.array(
+        [[rd.smooth(f2d, 5) for f2d in f3d] for f3d in da.values]
+    )
     np.testing.assert_array_equal(rd.smooth(da.values, 5), expected)
     lazy = rd.smooth_lazy(da, 5)
     assert lazy.chunks is not None and lazy.dims == da.dims
